@@ -188,6 +188,22 @@ WAKE_WORD = "hello echo scope"        # primary phrase shown in the UI
 WAKE_WORD_ALIASES = ["hello echo", "hi echo"]
 WAKE_WORD_SAMPLERATE = 16000
 WAKE_WORD_BLOCKSIZE = 8000
+# Vosk's grammar-restricted recognizer forces EVERY utterance onto one of
+# the grammar phrases or [unk], so ambient chatter is regularly decoded as
+# "hello echo" with low confidence. That was the main cause of ECHO waking
+# on its own. Require the mean per-word confidence of a final result to be
+# at least this high. Raise it if ECHO still wakes on its own; lower it if
+# the real phrase stops working. The [wake-word] log prints the confidence.
+WAKE_WORD_MIN_CONF = float(os.environ.get("WAKE_WORD_MIN_CONF", "0.80"))
+# After a session ends, ignore wake triggers for this long. Stops ECHO's own
+# farewell (played through the speaker into the mic) or a tap that landed
+# during the ACTIVE -> IDLE transition from instantly re-waking the kiosk.
+WAKE_COOLDOWN_AFTER_IDLE_SEC = float(
+    os.environ.get("WAKE_COOLDOWN_AFTER_IDLE_SEC", "4"))
+# Tap anywhere on the idle dashboard wakes ECHO. Set to false if a flaky
+# touchscreen produces ghost taps.
+WAKE_ON_TOUCH = os.environ.get("WAKE_ON_TOUCH", "true").lower() in (
+    "1", "true", "yes", "on")
 # Drop back to IDLE this long after the last *interaction* (a new person
 # greeted, an unknown face in frame, or a registration completing). A
 # recognised person who keeps standing in front of the camera does NOT
@@ -306,6 +322,24 @@ KIOSK_PORT = 8090   # 8080 is commonly taken by Open WebUI / similar.
 FUN_FACT_ROTATE_SEC = 15
 MJPEG_QUALITY = 80                # JPEG quality for the camera stream
 MJPEG_MAX_FPS = 20                # display only; detection runs at full rate
+# Re-use the last face embedding / match for this long while the same face
+# (by box overlap) stays in frame, instead of running ArcFace on every
+# frame. Detection + liveness still run every frame. 0 = embed every frame.
+RECOGNITION_REUSE_SEC = float(os.environ.get("RECOGNITION_REUSE_SEC", "0.5"))
+# How often the idle dashboard (projects / sessions / metrics) is re-read
+# from SQLite while IDLE, and while ACTIVE (where it isn't visible).
+IDLE_REFRESH_SEC = 5
+ACTIVE_REFRESH_SEC = 60
+
+# ---- External display API ---------------------------------------------------
+# When a recognised person starts talking to ECHO we POST
+#   {"state": "on", "employee_id": ..., "full_name": ...}
+# and when the session ends (goodbye, idle timeout, or X) we POST
+#   {"state": "off"}
+# to DISPLAY_API_URL with header X-API-Key. Unset URL = feature off.
+DISPLAY_API_URL = os.environ.get("DISPLAY_API_URL", "").strip()
+DISPLAY_API_KEY = os.environ.get("DISPLAY_API_KEY", "").strip()
+DISPLAY_API_TIMEOUT_SEC = float(os.environ.get("DISPLAY_API_TIMEOUT_SEC", "3"))
 
 WEATHER_REFRESH_SEC = 1800        # 30 minutes
 # Pinned to Calgary. IP geolocation was resolving the Pi's public IP to

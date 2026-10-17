@@ -88,10 +88,12 @@ class WakeWordListener:
         # a new stream session. That avoids the "FinalizeDecoding then
         # BestPathEnd" race that crashed the thread after a chat-voice
         # pause / resume cycle.
-        self._recognizer = vosk.KaldiRecognizer(
-            self._model, self.target_rate, self._grammar,
-        )
+        self._recognizer = self._new_recognizer()
         self._paused = threading.Event()
+        # Mean per-word confidence a final result needs to count as a wake.
+        self.min_conf = float(getattr(_cfg, "WAKE_WORD_MIN_CONF", 0.0))
+        # Activations before this epoch are discarded (see suppress()).
+        self._suppress_until = 0.0
 
         self._activated = threading.Event()
         self._stop = threading.Event()
@@ -120,6 +122,14 @@ class WakeWordListener:
             self._recognizer.Reset()
         except Exception:
             pass
+
+    def suppress(self, seconds: float) -> None:
+        """Ignore any wake phrase heard in the next `seconds`. Used right
+        after a session ends so ECHO's own farewell, still coming out of
+        the speaker, can't re-wake the kiosk."""
+        self._suppress_until = max(self._suppress_until,
+                                   time.time() + seconds)
+        self._activated.clear()
 
     def pause(self) -> None:
         """Close the mic stream so another component (e.g. chat-voice
@@ -161,9 +171,7 @@ class WakeWordListener:
             # after FinalizeDecoding has fired -- a pause/resume cycle
             # leaves it half-finalised and the next AcceptWaveform
             # throws "Failed to process waveform".
-            self._recognizer = vosk.KaldiRecognizer(
-                self._model, self.target_rate, self._grammar,
-            )
+            self._recognizer = self._new_recognizer()
             try:
                 stream = sd.RawInputStream(
                     samplerate=self.native_rate,
@@ -207,12 +215,24 @@ class WakeWordListener:
                 time.sleep(0.3)
             # stream is closed here -- ALSA device released for chat voice
 
+    def _new_recognizer(self):
+        rec = vosk.KaldiRecognizer(self._model, self.target_rate,
+                                   self._grammar)
+        # Per-word confidences, used to reject low-confidence matches.
+        rec.SetWords(True)
+        return rec
+
     def _consume(self, data: bytes) -> None:
         if self._recognizer.AcceptWaveform(data):
-            text = json.loads(self._recognizer.Result()).get("text", "").strip().lower()
+            result = json.loads(self._recognizer.Result())
+            text = result.get("text", "").strip().lower()
+            words = [w for w in (result.get("result") or [])
+                     if w.get("word") != "[unk]"]
+            conf = (sum(w.get("conf", 0.0) for w in words) / len(words)
+                    if words else 0.0)
             if text and self._on_final:
                 try:
-                    self._on_final(text)
+                    self._on_final(f"{text} (conf {conf:.2f})")
                 except Exception:
                     pass
             # Only fire on FINAL transcripts. Partial results from Vosk's
@@ -223,10 +243,20 @@ class WakeWordListener:
             # Match if the utterance IS one of our wake phrases (or
             # starts with one followed by filler). A bare substring
             # match would accept any sentence containing "hello echo".
-            for phrase in self._phrases:
-                if text == phrase or text.startswith(phrase + " "):
-                    self._activated.set()
-                    break
+            if not any(text == p or text.startswith(p + " ")
+                       for p in self._phrases):
+                return
+            if conf < self.min_conf:
+                print(f"[wake-word] rejected {text!r}: conf {conf:.2f} < "
+                      f"{self.min_conf:.2f}", flush=True)
+                return
+            if self._paused.is_set() or time.time() < self._suppress_until:
+                print(f"[wake-word] ignored {text!r} (paused / cooldown)",
+                      flush=True)
+                return
+            print(f"[wake-word] WAKE on {text!r} (conf {conf:.2f})",
+                  flush=True)
+            self._activated.set()
         else:
             text = json.loads(self._recognizer.PartialResult()).get("partial", "")
             if text and self._on_partial:

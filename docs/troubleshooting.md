@@ -18,6 +18,9 @@
 | Pi 5 freezes / system unresponsive | Pull latest — likely on the old branch with `vosk-model-en-us-0.22` (2-3 GB). The current code is pinned to the small model |
 | Camera shows fine in `libcamera-hello` but blank in the kiosk | The camera worker died. `tail -F /tmp/echo-backend.log` for the traceback |
 | `hailortcli scan` shows nothing | PCIe link issue. Run `sudo raspi-config nonint do_pcie_gen 3` and reboot |
+| ECHO wakes up by itself | Check the log line right before `[state] IDLE -> ACTIVE`. `[wake] touch on idle screen` means a tap (set `WAKE_ON_TOUCH=false` for a ghost-tapping screen). `[wake] wake word` means Vosk matched: look at the `conf` on the `WAKE on` line and raise `WAKE_WORD_MIN_CONF` above it. Re-wakes right after a goodbye are blocked by `WAKE_COOLDOWN_AFTER_IDLE_SEC` |
+| External display stays on / never switches | `grep display-api` in the log. Each call logs its HTTP status. Empty `DISPLAY_API_URL` disables the feature. Test against `python mock_display_api.py` first |
+| Duplicate or broken employee records | `python admin.py cleanup` reports them (dry run). `--apply` fixes whitespace, zero-sample rows, orphan samples and over-cap samples. Duplicate names are only reported |
 | Wake word never fires | `tail -F /tmp/echo-backend.log \| grep wake-word` to see what Vosk hears. If it's `"the"` / `"a"` / nothing, the mic isn't getting your voice — check `SD_DEVICE` |
 | Browser shows "ERR_CONNECTION_REFUSED" | Backend hasn't started. Look for `Error: backend didn't come up` in the terminal where `start.sh` ran |
 | `error: externally-managed-environment` on `pip install` | PEP 668 on Trixie. Activate the venv first: `source .venv/bin/activate && pip install ...`. The venv writes inside `.venv/lib/python3.13/`, leaving the apt-managed system Python alone |

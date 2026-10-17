@@ -98,6 +98,15 @@ class StateBus:
         with self._lock:
             return _to_json(self._state)
 
+    def get(self, *keys: str) -> dict:
+        """Cheap read of a few fields, for hot paths like the camera loop.
+        snapshot() runs dataclasses.asdict over the whole state (a full
+        recursive deep copy, chat history and project list included),
+        which is far too expensive to call several times per frame.
+        Values are returned as-is; callers must not mutate them."""
+        with self._lock:
+            return {k: getattr(self._state, k, None) for k in keys}
+
     # ---- write ---------------------------------------------------------
 
     def update(self, **kwargs) -> None:

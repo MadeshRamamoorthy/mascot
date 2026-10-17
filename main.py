@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import os
 import queue
-import random
 import re
 import threading
 import time
@@ -31,6 +30,7 @@ from async_tts import AsyncTTS
 from chat import ChatBackendError, ChatBudgetError, ChatClient
 from chat_voice import ChatVoiceCapture, ChatVoiceCaptureError
 from database import FaceDB
+from display_api import DisplayNotifier
 from frame_streamer import FrameStreamer
 from fun_facts import FunFactRotator
 from hailo_infer import HailoFacePipeline, align_face
@@ -68,6 +68,16 @@ def best_self_match(embeddings, db_ids, db_matrix, emp_id) -> float:
         return -1.0
     sub = db_matrix[mask]
     return max(float((sub @ e).max()) for e in embeddings)
+
+
+def _iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
 
 
 def largest_detection(dets):
@@ -121,7 +131,6 @@ def _is_goodbye(text: str) -> bool:
     The short-utterance cap is the cheapest defence against a user
     starting a long question with a polite "Bye" and then continuing.
     """
-    import re
     t = (text or "").lower().strip()
     t = re.sub(r"[^\w\s']+", " ", t)        # punctuation -> space (keep apostrophe)
     t = re.sub(r"\s+", " ", t).strip()
@@ -432,7 +441,7 @@ class CameraWorker(threading.Thread):
 
     def __init__(self, db, state, frames, tts, chat, greeter, learner,
                  register_queue, chat_queue, wake_event,
-                 idle_event, args, listener=None):
+                 idle_event, args, listener=None, display=None):
         super().__init__(name="camera-worker")
         self.db = db
         self.state = state
@@ -446,6 +455,7 @@ class CameraWorker(threading.Thread):
         self.wake_event = wake_event
         self.idle_event = idle_event
         self.listener = listener
+        self.display = display or DisplayNotifier(url="")
         self.args = args
         self.cam = None
         self.pipe = None
@@ -468,6 +478,10 @@ class CameraWorker(threading.Thread):
         # who wanders into frame mid-conversation doesn't get called out
         # over the current user. Reset to None on every IDLE -> ACTIVE.
         self._session_primary: str | None = None
+        # Last recognition result, re-used for RECOGNITION_REUSE_SEC while
+        # the same face (by box overlap) stays in frame:
+        # (bbox, at_epoch, (emp_id, name) or None, score).
+        self._last_rec = None
 
     def stop(self):
         self._stop.set()
@@ -543,6 +557,7 @@ class CameraWorker(threading.Thread):
         session_id = uuid.uuid4().hex[:12] if kiosk_state == "ACTIVE" else ""
         last_known_emp_id = "anon"
         last_idle_refresh = 0.0
+        last_clock_push = 0.0
 
         while not self._stop.is_set():
             self.last_loop_at = time.time()      # watchdog heartbeat
@@ -555,7 +570,11 @@ class CameraWorker(threading.Thread):
                 print(f"[camera-worker] frame grab failed: {exc!r}", flush=True)
                 time.sleep(0.1)
                 continue
-            self.state.set_now()
+            # The SPA keeps its own clock; now_epoch is only for /api/state.
+            # Pushing it every frame broadcast an SSE event ~30x a second.
+            if self.last_loop_at - last_clock_push >= 1.0:
+                last_clock_push = self.last_loop_at
+                self.state.set_now()
             # Detection overlays are drawn onto `frame` further down,
             # then we push to MJPEG. While IDLE we push immediately so
             # the dashboard's (unused) camera socket stays warm.
@@ -571,6 +590,7 @@ class CameraWorker(threading.Thread):
                 seen_in_session = set()
                 session_id = uuid.uuid4().hex[:12]
                 self._session_primary = None
+                self._last_rec = None
                 self._goodbye_exit = False
                 self._last_chat_at = 0.0
                 self.greeter.reset_last()
@@ -594,7 +614,9 @@ class CameraWorker(threading.Thread):
 
             # Refresh idle data periodically (projects / metrics /
             # session card) -- once every 5 s is plenty.
-            if time.time() - last_idle_refresh > 5:
+            refresh_every = (config.IDLE_REFRESH_SEC if kiosk_state == "IDLE"
+                             else config.ACTIVE_REFRESH_SEC)
+            if time.time() - last_idle_refresh > refresh_every:
                 last_idle_refresh = time.time()
                 self._refresh_idle_data()
 
@@ -623,6 +645,7 @@ class CameraWorker(threading.Thread):
                         continue
                     self._run_registration(req)
                     emp_ids, names, matrix = self.db.load_all()
+                    self._last_rec = None
                     last_interaction_at = time.time()
             except queue.Empty:
                 pass
@@ -651,7 +674,7 @@ class CameraWorker(threading.Thread):
             # feed still streams to the SPA (so the user sees themselves
             # if the listen overlay isn't covering it), but no Hailo
             # cycles get spent on a face that isn't going to be acted on.
-            snap_chat = self.state.snapshot()
+            snap_chat = self.state.get("chat_pending", "listening")
             chat_busy = bool(
                 snap_chat.get("chat_pending") or snap_chat.get("listening")
             )
@@ -663,7 +686,9 @@ class CameraWorker(threading.Thread):
             dets = []
             biggest = None
             face_labels: list[tuple] = []
-            if not chat_busy:
+            # Nothing consumes detections while IDLE (the dashboard has no
+            # camera view), so don't spend NPU + CPU on them.
+            if kiosk_state == "ACTIVE" and not chat_busy:
                 dets = self.pipe.detect(frame, config.DETECTOR_SCORE_THRESHOLD,
                                         config.DETECTOR_NMS_IOU)
                 biggest = largest_detection(dets)
@@ -693,19 +718,36 @@ class CameraWorker(threading.Thread):
                         face_labels.append(
                             (det, "checking liveness…", (0, 200, 255)))
                     else:
-                        aligned = align_face(frame, det.landmarks)
-                        emb = self.pipe.embed(aligned)
-                        idx, score, runner_up = cosine_match(emb, matrix)
-                        if idx >= 0 and score >= config.COSINE_MATCH_THRESHOLD:
-                            if self.learner.maybe_add(
-                                emp_ids[idx], names[idx], emb, score, runner_up,
-                            ):
-                                emp_ids, names, matrix = self.db.load_all()
+                        now_t = time.time()
+                        last = self._last_rec
+                        if (last is not None
+                                and now_t - last[1] < config.RECOGNITION_REUSE_SEC
+                                and _iou(last[0], det.bbox) > 0.5):
+                            # Same face, matched a moment ago: re-use it
+                            # instead of another ArcFace pass on the NPU.
+                            match, score = last[2], last[3]
+                        else:
+                            aligned = align_face(frame, det.landmarks)
+                            emb = self.pipe.embed(aligned)
+                            idx, score, runner_up = cosine_match(emb, matrix)
+                            match = None
+                            if idx >= 0 and score >= config.COSINE_MATCH_THRESHOLD:
+                                # Capture who matched BEFORE any reload: the
+                                # learner may trim old rows, which shifts
+                                # indices in the reloaded gallery.
+                                match = (emp_ids[idx], names[idx])
+                                if self.learner.maybe_add(
+                                        match[0], match[1], emb,
+                                        score, runner_up):
+                                    emp_ids, names, matrix = self.db.load_all()
+                            self._last_rec = (tuple(det.bbox), now_t,
+                                              match, score)
+                        if match is not None:
                             pending_greets.append(
-                                (emp_ids[idx], names[idx], det, score)
+                                (match[0], match[1], det, score)
                             )
                             face_labels.append((
-                                det, f"{names[idx]}  {score:.2f}", (0, 255, 0),
+                                det, f"{match[1]}  {score:.2f}", (0, 255, 0),
                             ))
                         else:
                             face_labels.append((det, "Unknown", (0, 255, 255)))
@@ -740,12 +782,16 @@ class CameraWorker(threading.Thread):
                         seen_in_session.add(emp_id)
                         if self._session_primary is None:
                             self._session_primary = emp_id
+                            # Recognised person now owns the session:
+                            # switch the external display on for them.
+                            self.display.on(emp_id, name)
                         self.db.record_interaction(emp_id, session_id)
                         self._push_metrics()
                         last_known_emp_id = emp_id
 
                 # Auto-open the register overlay for new visitors.
-                snap = self.state.snapshot()
+                snap = self.state.get("register_open", "chat_pending",
+                                      "listening", "chat_history", "person")
                 # Don't offer registration while a session is already engaged
                 # with someone: a recognised person owns it (_session_primary),
                 # they're talking (listening), or a chat happened recently. A
@@ -856,10 +902,23 @@ class CameraWorker(threading.Thread):
                         # shouldn't keep talking about the previous session.
                         self.tts.interrupt()
                     self.state.go_idle()
+                    # Session over: switch the external display off (no-op
+                    # if nobody was recognised, so no "on" was ever sent).
+                    self.display.off()
+                    self._last_rec = None
+                    # A wake that was latched while ACTIVE (a tap on the
+                    # dashboard during the transition, a listener hit just
+                    # before it paused) would otherwise fire the moment we
+                    # land on IDLE -- the "woke up by itself" symptom.
+                    self.wake_event.clear()
                     # Resume the wake-word listener -- the user is gone,
                     # we need to be listening for the next "hello echo".
+                    # The cooldown keeps ECHO's own farewell, still in the
+                    # speaker / room, from re-waking it.
                     if self.listener is not None:
                         self.listener.resume()
+                        self.listener.suppress(
+                            config.WAKE_COOLDOWN_AFTER_IDLE_SEC)
                     reason = ("user closed" if force_idle
                               else "chat idle goodbye" if graceful
                               else f"idle {idle_for:.0f}s")
@@ -876,7 +935,7 @@ class CameraWorker(threading.Thread):
                     # 3-6 s, long enough that a late answer would speak
                     # over the user's next question. Discard it. Fresh
                     # snapshot so a mic-tap milliseconds ago is caught.
-                    if self.state.snapshot().get("listening"):
+                    if self.state.get("listening")["listening"]:
                         print("[chat] discarding stale answer "
                                "(user is asking again)", flush=True)
                         self.state.update(chat_pending=False)
@@ -1366,7 +1425,7 @@ def main():
 
     weather = WeatherPoller()
     weather.start()
-    state_weather_pump = _start_weather_pump(weather, state)
+    _start_weather_pump(weather, state)
 
     fun_facts = FunFactRotator(state)
     fun_facts.start()
@@ -1377,6 +1436,7 @@ def main():
                  chat_remaining=config.CHAT_MAX_QUESTIONS_PER_SESSION)
 
     greeter = Greeter(tts, state, db=db)
+    display = DisplayNotifier()
     learner = SilentLearner(db)
     frames = FrameStreamer()
 
@@ -1453,7 +1513,8 @@ def main():
     # Worker thread.
     worker = CameraWorker(db, state, frames, tts, chat, greeter, learner,
                           register_q, chat_q,
-                          wake_event, idle_event, args, listener=listener)
+                          wake_event, idle_event, args, listener=listener,
+                          display=display)
     worker.start()
 
     # Watchdog: bounce the process (systemd Restart=always relaunches with
@@ -1465,6 +1526,12 @@ def main():
 
     # Flask app -- callbacks bridge the browser to the worker.
     def request_wake():
+        # Touch wake. Logged so a ghost tap is distinguishable from the
+        # wake word in the journal; WAKE_ON_TOUCH=false disables it.
+        if not config.WAKE_ON_TOUCH:
+            print("[wake] touch ignored (WAKE_ON_TOUCH=false)", flush=True)
+            return
+        print("[wake] touch on idle screen", flush=True)
         wake_event.set()
 
     def request_idle():
@@ -1512,6 +1579,7 @@ def main():
         # isn't mistaken for a crash.
         _shutdown.set()
         worker.stop()
+        display.off()
         if listener is not None:
             listener.stop()
         weather.stop()
@@ -1585,6 +1653,7 @@ def _start_purge_sweeper(db: FaceDB) -> None:
 def _poll_wake(listener: WakeWordListener, ev: threading.Event):
     while True:
         if listener.is_activated():
+            print("[wake] wake word", flush=True)
             ev.set()
             listener.deactivate()
         time.sleep(0.1)

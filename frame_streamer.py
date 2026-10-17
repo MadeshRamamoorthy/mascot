@@ -35,6 +35,10 @@ class FrameStreamer:
     def push(self, frame_bgr) -> None:
         """Encode frame to JPEG and wake subscribers. Throttled to
         MJPEG_MAX_FPS to keep CPU light when nobody's watching."""
+        # Nobody is watching (the dashboard drops the stream while IDLE):
+        # skip the JPEG encode entirely, it's the costliest step here.
+        if not self._subscribers:
+            return
         now = time.time()
         if now - self._last_push < self._min_interval:
             return
