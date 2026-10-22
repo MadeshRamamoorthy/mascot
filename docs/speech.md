@@ -96,14 +96,6 @@ on the Hailo NPU. By default `start.sh` skips it when
 `OPENAI_API_KEY` is set (saves 2-3 GB of resident memory). Set
 `PRELOAD_OLLAMA=1` to always warm it.
 
-### Anthropic / Claude
-
-Not wired into `chat.py` today. Claude's API is text + image only, so
-even if you wired it as the LLM you'd still need a separate STT
-(Whisper anywhere — OpenAI / Hailo / local) and a separate TTS.
-
----
-
 ## TTS
 
 `async_tts.AsyncTTS` wraps the synchronous backend with a queue so

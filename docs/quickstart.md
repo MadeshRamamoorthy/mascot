@@ -10,7 +10,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-nano .env                                  # paste OPENAI_API_KEY=sk-...
+nano .env                                  # set OPENAI_API_KEY=<API_KEY>
 
 ./start.sh
 ```
