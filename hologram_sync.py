@@ -2,6 +2,16 @@
 
 Two ways in, one send function:
 
+0. Bulk-upload ZIP for the hologram app (no network needed):
+
+       python hologram_sync.py --export-zip hologram_upload.zip
+       python hologram_sync.py --export-zip out.zip --include-no-photo
+
+   The ZIP holds employees.csv (employee_id, full_name, photo) plus one
+   <employee_id>.jpg per person, side by side at the top level. The
+   `photo` column is that file name. Also downloadable from /admin
+   (Employees tab).
+
 1. One-time / catch-up utility, run BEFORE the kiosk starts so it
    doesn't compete with the camera + NPU for memory:
 
@@ -37,7 +47,10 @@ send succeeds, and is reset to NULL whenever the photo or name changes.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import queue
+import re
 import sys
 import threading
 import time
@@ -83,6 +96,56 @@ def face_crop_jpeg(frame_bgr, bbox, margin: float | None = None,
                           interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
     return bytes(buf) if ok else None
+
+
+# ---------- bulk-upload ZIP -------------------------------------------------
+
+
+BULK_CSV_NAME = "employees.csv"
+BULK_COLUMNS = ("employee_id", "full_name", "photo")
+
+
+def _photo_name(emp_id: str) -> str:
+    # Keep file names safe on any OS / unzip tool.
+    return re.sub(r"[^A-Za-z0-9._-]", "_", emp_id) + ".jpg"
+
+
+def build_bulk_zip(db, include_no_photo: bool = False) -> tuple[bytes, dict]:
+    """Return (zip_bytes, counts) for the hologram bulk upload.
+
+    employees.csv has columns employee_id, full_name, photo. `photo` is the
+    file name of that person's JPEG inside the same ZIP. People without a
+    photo are left out unless include_no_photo, then `photo` is empty."""
+    import zipfile
+    rows = db.hologram_rows(pending_only=False)
+    out_rows, used, skipped = [], set(), 0
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for emp_id, name, has_photo, _at, _err in rows:
+            photo = ""
+            if has_photo:
+                jpeg = db.get_photo(emp_id)
+                photo = _photo_name(emp_id)
+                n = 2
+                while photo in used:            # two IDs mapping to one name
+                    photo = f"{_photo_name(emp_id)[:-4]}_{n}.jpg"
+                    n += 1
+                used.add(photo)
+                # JPEGs don't shrink further; store them as-is.
+                zf.writestr(photo, jpeg, compress_type=zipfile.ZIP_STORED)
+            elif not include_no_photo:
+                skipped += 1
+                continue
+            out_rows.append((emp_id, name, photo))
+        text = io.StringIO()
+        w = csv.writer(text, lineterminator="\n")
+        w.writerow(BULK_COLUMNS)
+        w.writerows(out_rows)
+        zf.writestr(BULK_CSV_NAME, text.getvalue().encode("utf-8"))
+    counts = {"rows": len(out_rows),
+              "photos": sum(1 for r in out_rows if r[2]),
+              "skipped_no_photo": skipped}
+    return buf.getvalue(), counts
 
 
 # ---------- sending ---------------------------------------------------------
@@ -251,12 +314,25 @@ def main() -> int:
                    help="show sync status and exit")
     p.add_argument("--dry-run", action="store_true",
                    help="list what would be sent and exit")
+    p.add_argument("--export-zip", metavar="PATH",
+                   help="write the bulk-upload ZIP (employees.csv + photos) "
+                        "to PATH and exit; no network needed")
     p.add_argument("--delay", type=float, default=0.2,
                    help="seconds between sends (default 0.2)")
     a = p.parse_args()
 
     from database import FaceDB
     db = FaceDB()
+    if a.export_zip:
+        data, counts = build_bulk_zip(db, include_no_photo=a.include_no_photo)
+        with open(a.export_zip, "wb") as fp:
+            fp.write(data)
+        print(f"[hologram] wrote {a.export_zip}: {counts['rows']} employees, "
+              f"{counts['photos']} photos"
+              + (f", {counts['skipped_no_photo']} left out (no photo; "
+                 "--include-no-photo to add them)"
+                 if counts['skipped_no_photo'] else ""))
+        return 0
     if a.status or a.dry_run:
         _print_status(db)
         return 0

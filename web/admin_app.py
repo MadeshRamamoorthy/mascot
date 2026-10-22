@@ -275,6 +275,29 @@ def create_admin_app(
         status = 200 if result.get("ok") else 400
         return jsonify(result), status
 
+    # -------- hologram bulk-upload ZIP ----------------------------------
+
+    @app.route("/api/hologram/export.zip")
+    def hologram_export():
+        """employees.csv (employee_id, full_name, photo) + photos, for the
+        hologram app's bulk upload. ?include_no_photo=1 adds people who
+        have no photo yet (empty photo cell)."""
+        if not check_admin_auth():
+            return request_admin_auth()
+        import io
+        import time
+        from flask import send_file
+        from hologram_sync import build_bulk_zip
+        include = request.args.get("include_no_photo") in ("1", "true", "yes")
+        data, counts = build_bulk_zip(db, include_no_photo=include)
+        resp = send_file(
+            io.BytesIO(data), mimetype="application/zip", as_attachment=True,
+            download_name=f"hologram_upload_{time.strftime('%Y%m%d_%H%M')}.zip",
+        )
+        resp.headers["X-Employee-Rows"] = str(counts["rows"])
+        resp.headers["X-Skipped-No-Photo"] = str(counts["skipped_no_photo"])
+        return resp
+
     # -------- metrics ----------------------------------------------------
 
     @app.route("/api/metrics")

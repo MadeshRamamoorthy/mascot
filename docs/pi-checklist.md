@@ -232,7 +232,26 @@ hologram app as multipart form data. Fields are `employee_id`,
 - **People registered before this change have no photo.** ECHO saves
   one the next time it recognises them, then sends it.
 
-**Confirm the hologram API format first.** The fields above are an
+**Bulk upload (preferred, the hologram app now takes a ZIP).** Build
+the ZIP on the Pi, or download it from `/admin` on the Employees tab
+with the "Download hologram ZIP" button. Then upload it in the hologram
+app. The ZIP holds `employees.csv` (columns `employee_id`, `full_name`,
+`photo`) plus one `<employee_id>.jpg` per person. The `photo` cell is
+that file name.
+
+```bash
+python hologram_sync.py --export-zip hologram_upload.zip
+python hologram_sync.py --export-zip hologram_upload.zip --include-no-photo
+```
+
+People without a photo are left out unless `--include-no-photo` is
+given; their `photo` cell is then empty.
+
+- [ ] ZIP built / downloaded
+- [ ] Hologram app accepted it and shows every row with the right photo
+
+**Live sending (optional).** It stays off unless `HOLOGRAM_SYNC_URL` is
+set. **Confirm the hologram API format first.** The fields above are an
 assumption. If the hologram app expects something else, change
 `_build_request` in `hologram_sync.py`.
 

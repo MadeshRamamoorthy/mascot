@@ -138,6 +138,14 @@
   pull a one-liner from the page.
 </p>
 <div style="margin-top: 18px; padding-top: 12px; border-top: 1px solid #eee;">
+  <a href="/api/hologram/export.zip" download><button type="button">Download hologram ZIP</button></a>
+  <a href="/api/hologram/export.zip?include_no_photo=1" download><button type="button">Download incl. people without photo</button></a>
+  <span class="sub" style="margin-left: 8px;">
+    employees.csv (employee_id, full_name, photo) + photos, for the
+    hologram app's bulk upload.
+  </span>
+</div>
+<div style="margin-top: 18px; padding-top: 12px; border-top: 1px solid #eee;">
   <button id="wipe-faces-btn" class="danger" type="button">Wipe all faces</button>
   <span class="sub" style="margin-left: 8px;">
     Event reset: permanently deletes every registered face. Hi-5 counts
