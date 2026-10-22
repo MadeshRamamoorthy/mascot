@@ -43,6 +43,18 @@ def create_admin_app(
     """
     if pipeline_factory is None:
         pipeline_factory = _default_pipeline_factory
+    hologram = None            # created on first registration
+
+    def _send_to_hologram(emp_id: str) -> None:
+        nonlocal hologram
+        try:
+            if hologram is None:
+                from hologram_sync import HologramSync
+                hologram = HologramSync()
+            hologram.push(emp_id)
+        except Exception as exc:  # noqa: BLE001
+            # Stays pending in the DB; the next sync run sends it.
+            print(f"[hologram] admin push failed for {emp_id}: {exc!r}")
 
     app = Flask(
         __name__,
@@ -258,6 +270,8 @@ def create_admin_app(
             except Exception:
                 pass
 
+        if result.get("ok"):
+            _send_to_hologram(emp_id)
         status = 200 if result.get("ok") else 400
         return jsonify(result), status
 

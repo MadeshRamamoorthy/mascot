@@ -210,6 +210,16 @@ esac
 # python -c invocation here can't share the loaded pipeline with the
 # kiosk backend, so it never actually helped first-chat latency.
 
+# ---- Hologram catch-up sync -----------------------------------------------
+# Send any employees not yet delivered to the hologram app (new since the
+# last run, or missed while it was offline). Runs here, BEFORE the kiosk,
+# so it doesn't compete with the camera + NPU for memory. Never blocks
+# start-up: bounded by a timeout and failures are ignored.
+if [[ -n "${HOLOGRAM_SYNC_URL:-}" ]] && [[ "${HOLOGRAM_SYNC_ON_START:-1}" != 0 ]]; then
+    echo "   hologram   : syncing pending employees -> $HOLOGRAM_SYNC_URL"
+    timeout "${HOLOGRAM_SYNC_START_TIMEOUT:-180}" python hologram_sync.py         2>&1 | sed 's/^/                /' || true
+fi
+
 # ---- Launch the kiosk ----------------------------------------------------
 # Backend (Flask + camera worker) runs in the background; once it's
 # serving /api/state we open Chromium in kiosk mode pointed at the SPA.

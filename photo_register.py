@@ -56,6 +56,7 @@ def register_from_photos(
 
     embeddings = []
     skipped = 0
+    best_photo = None          # (detector score, jpeg) of the clearest face
     for blob in photos:
         arr = np.frombuffer(blob, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -75,6 +76,13 @@ def register_from_photos(
             continue
         aligned = align_face(img, det.landmarks)
         embeddings.append(pipeline.embed(aligned))
+        if best_photo is None or det.score > best_photo[0]:
+            from hologram_sync import face_crop_jpeg
+            # Crop from the BGR decode so colours are right in the JPEG.
+            jpeg = face_crop_jpeg(cv2.cvtColor(img, cv2.COLOR_RGB2BGR),
+                                  det.bbox)
+            if jpeg:
+                best_photo = (det.score, jpeg)
 
     if not embeddings:
         return {
@@ -90,5 +98,8 @@ def register_from_photos(
             db.add_embedding(emp_id, e)
     else:
         db.add_employee(emp_id, name, embeddings)
+    if best_photo is not None:
+        db.set_photo(emp_id, best_photo[1])
 
-    return {"ok": True, "samples": len(embeddings), "skipped": skipped}
+    return {"ok": True, "samples": len(embeddings), "skipped": skipped,
+            "photo": best_photo is not None}

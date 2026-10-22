@@ -218,6 +218,71 @@ code of each call.
 
 ---
 
+## 8. Hologram app: employee details + photos
+
+What changed: ECHO now keeps **one face photo per person** (a JPEG crop
+in `faces.db`). Each person's ID, name and photo are POSTed to the
+hologram app as multipart form data. Fields are `employee_id`,
+`full_name` and `image`.
+
+- **New registration** (kiosk or `/admin` photo upload): sent right
+  away in the background.
+- **Hologram app offline:** the person stays "not sent". The kiosk
+  retries every 10 min, and `start.sh` retries before every launch.
+- **People registered before this change have no photo.** ECHO saves
+  one the next time it recognises them, then sends it.
+
+**Confirm the hologram API format first.** The fields above are an
+assumption. If the hologram app expects something else, change
+`_build_request` in `hologram_sync.py`.
+
+**Test with the mock** (same laptop mock as section 7):
+
+```bash
+# Pi .env
+HOLOGRAM_SYNC_URL=http://<laptop-ip>:8765/api/employees
+HOLOGRAM_API_KEY=test-key
+```
+
+**One-time sync, before the kiosk starts:**
+
+```bash
+./stop.sh                                # free memory first
+python hologram_sync.py --status         # who is pending / has no photo
+python hologram_sync.py --dry-run
+python hologram_sync.py                  # send everyone pending, one by one
+python hologram_sync.py --all            # force a full re-send
+python hologram_sync.py --include-no-photo   # also send people without a photo
+```
+
+The exit code tells you how it went:
+
+| Code | Meaning |
+|---|---|
+| 0 | All sent |
+| 1 | Some were rejected (see "last error" in `--status`) |
+| 2 | The hologram app was unreachable. Nothing is lost, everyone stays pending |
+
+- [ ] Agreed the request format with the hologram app owner
+- [ ] `--status` shows the expected people
+- [ ] One-time sync sends everyone with a photo
+- [ ] Photos in the laptop's `mock_hologram_photos/` folder look right:
+      face centred, **colours correct** (not blue-tinted)
+- [ ] Register a new person on the kiosk: it shows up on the mock at once
+- [ ] Stop the mock, register someone, start the mock, run
+      `python hologram_sync.py`: the missed person is sent
+- [ ] An existing person without a photo gets one after being recognised
+      once (`[hologram] back-filled photo for ...` in the log)
+- [ ] `start.sh` prints `hologram : syncing pending employees` at launch
+- [ ] Switched `.env` to the real hologram URL and key
+
+Settings: `HOLOGRAM_SYNC_ON_START=0` skips the start-up sync.
+`HOLOGRAM_RETRY_SEC=0` turns off the in-kiosk retry.
+`HOLOGRAM_BACKFILL_ON_RECOGNITION=false` stops saving photos for
+existing people.
+
+---
+
 ## If something goes wrong
 
 Roll back to the previous branch and restore the DB:

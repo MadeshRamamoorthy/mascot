@@ -341,6 +341,31 @@ DISPLAY_API_URL = os.environ.get("DISPLAY_API_URL", "").strip()
 DISPLAY_API_KEY = os.environ.get("DISPLAY_API_KEY", "").strip()
 DISPLAY_API_TIMEOUT_SEC = float(os.environ.get("DISPLAY_API_TIMEOUT_SEC", "3"))
 
+# ---- Hologram app: employee details + face photo -------------------------
+# Each employee is POSTed (multipart: employee_id, full_name, image) to
+# HOLOGRAM_SYNC_URL. See hologram_sync.py. Unset URL = feature off.
+HOLOGRAM_SYNC_URL = os.environ.get("HOLOGRAM_SYNC_URL", "").strip()
+# Defaults to the display API key when not set separately.
+HOLOGRAM_API_KEY = (os.environ.get("HOLOGRAM_API_KEY", "").strip()
+                    or DISPLAY_API_KEY)
+HOLOGRAM_TIMEOUT_SEC = float(os.environ.get("HOLOGRAM_TIMEOUT_SEC", "10"))
+# While the kiosk runs, retry not-yet-sent people this often. 0 = only the
+# start-up utility retries.
+HOLOGRAM_RETRY_SEC = float(os.environ.get("HOLOGRAM_RETRY_SEC", "600"))
+# Send people who have no photo yet (details only). Default off: they are
+# sent once a photo exists.
+HOLOGRAM_SEND_WITHOUT_PHOTO = os.environ.get(
+    "HOLOGRAM_SEND_WITHOUT_PHOTO", "false").lower() in ("1", "true", "yes", "on")
+# People registered before photos were stored have none. When true, the
+# kiosk saves a photo the next time it recognises them, then sends it.
+HOLOGRAM_BACKFILL_ON_RECOGNITION = os.environ.get(
+    "HOLOGRAM_BACKFILL_ON_RECOGNITION", "true").lower() in (
+    "1", "true", "yes", "on")
+# Face crop: extra margin around the face box (fraction of box size) and
+# the longest side of the saved JPEG.
+HOLOGRAM_PHOTO_MARGIN = 0.6
+HOLOGRAM_PHOTO_MAX_SIDE = 480
+
 WEATHER_REFRESH_SEC = 1800        # 30 minutes
 # Pinned to Calgary. IP geolocation was resolving the Pi's public IP to
 # Edmonton (ISP routing), so the kiosk reported the wrong city. With

@@ -34,6 +34,7 @@ from display_api import DisplayNotifier
 from frame_streamer import FrameStreamer
 from fun_facts import FunFactRotator
 from hailo_infer import HailoFacePipeline, align_face
+from hologram_sync import HologramSync, face_crop_jpeg
 from liveness import LivenessChecker
 from quality import (is_quality_face, landmark_anchor, landmarks_drift,
                      shift_matches_direction)
@@ -441,7 +442,8 @@ class CameraWorker(threading.Thread):
 
     def __init__(self, db, state, frames, tts, chat, greeter, learner,
                  register_queue, chat_queue, wake_event,
-                 idle_event, args, listener=None, display=None):
+                 idle_event, args, listener=None, display=None,
+                 hologram=None):
         super().__init__(name="camera-worker")
         self.db = db
         self.state = state
@@ -456,6 +458,12 @@ class CameraWorker(threading.Thread):
         self.idle_event = idle_event
         self.listener = listener
         self.display = display or DisplayNotifier(url="")
+        # Hologram app: sends a person's details + face photo when they
+        # are registered (and back-fills a photo for people registered
+        # before photos were kept). See hologram_sync.py.
+        self.hologram = hologram
+        self._photo_ids: set[str] = set()
+        self._reg_photo: tuple[float, bytes] | None = None
         self.args = args
         self.cam = None
         self.pipe = None
@@ -545,6 +553,7 @@ class CameraWorker(threading.Thread):
             return
         emp_ids, names, matrix = self.db.load_all()
         print(f"Loaded {matrix.shape[0]} embeddings for {len(set(emp_ids))} employees.")
+        self._photo_ids = self.db.photo_ids()
         self._refresh_idle_data()
 
         # State machine local vars.
@@ -736,6 +745,8 @@ class CameraWorker(threading.Thread):
                                 # learner may trim old rows, which shifts
                                 # indices in the reloaded gallery.
                                 match = (emp_ids[idx], names[idx])
+                                self._maybe_backfill_photo(match[0], frame,
+                                                           det)
                                 if self.learner.maybe_add(
                                         match[0], match[1], emb,
                                         score, runner_up):
@@ -1006,6 +1017,7 @@ class CameraWorker(threading.Thread):
                 return
             for e in embeddings:
                 self.db.add_embedding(emp_id, e)
+            self._save_registration_photo(emp_id)
             confirm = messages.random_registration_prompt(
                 "confirm_registration", name=name,
             )
@@ -1017,6 +1029,7 @@ class CameraWorker(threading.Thread):
             )
         else:
             self.db.add_employee(emp_id, name, embeddings)
+            self._save_registration_photo(emp_id)
             confirm = messages.random_registration_prompt(
                 "confirm_registration", name=name,
             )
@@ -1027,8 +1040,41 @@ class CameraWorker(threading.Thread):
                 register_message=f"Welcome, {name}!",
             )
 
+    def _maybe_backfill_photo(self, emp_id, frame, det) -> None:
+        """First time we recognise someone who has no stored photo, save a
+        crop of this (clean, quality-checked) frame and send it on."""
+        if (emp_id in self._photo_ids
+                or not config.HOLOGRAM_BACKFILL_ON_RECOGNITION):
+            return
+        self._photo_ids.add(emp_id)       # once per person, even on failure
+        try:
+            jpeg = face_crop_jpeg(frame, det.bbox)
+            if not jpeg:
+                return
+            self.db.set_photo(emp_id, jpeg)
+            print(f"[hologram] back-filled photo for {emp_id}", flush=True)
+            if self.hologram is not None:
+                self.hologram.push(emp_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[hologram] photo back-fill failed for {emp_id}: "
+                  f"{exc!r}", flush=True)
+
+    def _save_registration_photo(self, emp_id: str) -> None:
+        photo, self._reg_photo = self._reg_photo, None
+        if photo is None:
+            return
+        try:
+            self.db.set_photo(emp_id, photo[1])
+            self._photo_ids.add(emp_id)
+            if self.hologram is not None:
+                self.hologram.push(emp_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[hologram] saving photo for {emp_id} failed: {exc!r}",
+                  flush=True)
+
     def _capture_with_prompts(self):
         embeddings = []
+        self._reg_photo = None
         prompts = config.POSE_PROMPTS
         baseline_anchor = None
         baseline_eye_dist = 1.0
@@ -1098,6 +1144,15 @@ class CameraWorker(threading.Thread):
                                 aligned = align_face(frame, det.landmarks)
                                 embeddings.append(self.pipe.embed(aligned))
                                 got += 1
+                                # Keep the sharpest straight-on capture as
+                                # the person's photo (frontal poses win).
+                                rank = det.score + (1.0 if direction is None
+                                                    else 0.0)
+                                if (self._reg_photo is None
+                                        or rank > self._reg_photo[0]):
+                                    jpeg = face_crop_jpeg(frame, det.bbox)
+                                    if jpeg:
+                                        self._reg_photo = (rank, jpeg)
                                 if direction is None and baseline_anchor is None:
                                     baseline_anchor = anchor
                                     baseline_eye_dist = eye_dist
@@ -1437,6 +1492,7 @@ def main():
 
     greeter = Greeter(tts, state, db=db)
     display = DisplayNotifier()
+    hologram = HologramSync()
     learner = SilentLearner(db)
     frames = FrameStreamer()
 
@@ -1514,7 +1570,7 @@ def main():
     worker = CameraWorker(db, state, frames, tts, chat, greeter, learner,
                           register_q, chat_q,
                           wake_event, idle_event, args, listener=listener,
-                          display=display)
+                          display=display, hologram=hologram)
     worker.start()
 
     # Watchdog: bounce the process (systemd Restart=always relaunches with

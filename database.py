@@ -25,6 +25,14 @@ CREATE TABLE IF NOT EXISTS face_embeddings (
 
 CREATE INDEX IF NOT EXISTS idx_face_emp ON face_embeddings(emp_id);
 
+-- One face photo (JPEG crop) per person, sent to the hologram app.
+CREATE TABLE IF NOT EXISTS employee_photos (
+    emp_id      TEXT PRIMARY KEY,
+    jpeg        BLOB NOT NULL,
+    captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (emp_id) REFERENCES employees(emp_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS projects (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     title       TEXT NOT NULL,
@@ -94,6 +102,10 @@ class FaceDB:
             "custom_welcome TEXT",         # admin-written welcome line (overrides cache)
             "welcome_cache TEXT",          # LLM-generated welcome from profile_url
             "profile_updated_at TIMESTAMP",
+            # Hologram sync: NULL synced_at = not sent yet (or changed
+            # since). hologram_error holds the last failure reason.
+            "hologram_synced_at TIMESTAMP",
+            "hologram_error TEXT",
         ):
             col_name = col_def.split()[0]
             if col_name in emp_cols:
@@ -197,12 +209,83 @@ class FaceDB:
         if not sets:
             return False
         sets.append("profile_updated_at = CURRENT_TIMESTAMP")
+        if "name" in fields:
+            # The hologram app holds the name too: re-send it.
+            sets.append("hologram_synced_at = NULL")
         vals.append(emp_id)
         cur = self.conn.execute(
             f"UPDATE employees SET {', '.join(sets)} WHERE emp_id = ?", vals,
         )
         self.conn.commit()
         return cur.rowcount > 0
+
+    # ---- face photo + hologram sync ---------------------------------------
+
+    def set_photo(self, emp_id: str, jpeg: bytes) -> None:
+        """Store / replace this person's face photo and mark them as not
+        yet sent to the hologram app."""
+        self.conn.execute(
+            "INSERT INTO employee_photos (emp_id, jpeg) VALUES (?, ?) "
+            "ON CONFLICT(emp_id) DO UPDATE SET jpeg = excluded.jpeg, "
+            "captured_at = CURRENT_TIMESTAMP",
+            (emp_id, jpeg),
+        )
+        self.conn.execute(
+            "UPDATE employees SET hologram_synced_at = NULL WHERE emp_id = ?",
+            (emp_id,),
+        )
+        self.conn.commit()
+
+    def get_photo(self, emp_id: str) -> bytes | None:
+        row = self.conn.execute(
+            "SELECT jpeg FROM employee_photos WHERE emp_id = ?", (emp_id,)
+        ).fetchone()
+        return bytes(row[0]) if row else None
+
+    def photo_ids(self) -> set[str]:
+        return {r[0] for r in self.conn.execute(
+            "SELECT emp_id FROM employee_photos").fetchall()}
+
+    def has_photo(self, emp_id: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM employee_photos WHERE emp_id = ?", (emp_id,)
+        ).fetchone() is not None
+
+    def hologram_rows(self, pending_only: bool = True):
+        """Return [(emp_id, name, has_photo, synced_at, last_error)],
+        sorted by emp_id. pending_only=True keeps only not-yet-sent rows."""
+        where = "WHERE e.hologram_synced_at IS NULL" if pending_only else ""
+        return self.conn.execute(
+            f"""
+            SELECT e.emp_id, e.name, p.emp_id IS NOT NULL,
+                   e.hologram_synced_at, e.hologram_error
+            FROM employees e
+            LEFT JOIN employee_photos p ON p.emp_id = e.emp_id
+            {where}
+            ORDER BY e.emp_id
+            """
+        ).fetchall()
+
+    def mark_hologram_sent(self, emp_id: str) -> None:
+        self.conn.execute(
+            "UPDATE employees SET hologram_synced_at = CURRENT_TIMESTAMP, "
+            "hologram_error = NULL WHERE emp_id = ?", (emp_id,),
+        )
+        self.conn.commit()
+
+    def mark_hologram_failed(self, emp_id: str, error: str) -> None:
+        self.conn.execute(
+            "UPDATE employees SET hologram_synced_at = NULL, "
+            "hologram_error = ? WHERE emp_id = ?", (error[:300], emp_id),
+        )
+        self.conn.commit()
+
+    def reset_hologram_sync(self) -> int:
+        """Mark everyone as not sent (for a full re-send)."""
+        cur = self.conn.execute(
+            "UPDATE employees SET hologram_synced_at = NULL")
+        self.conn.commit()
+        return cur.rowcount
 
     def delete_employee(self, emp_id: str) -> bool:
         cur = self.conn.execute(

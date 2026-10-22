@@ -1,4 +1,4 @@
-"""Stand-in for the external display service, for local testing.
+"""Stand-in for the external display + hologram services, for local testing.
 
 Accepts the same calls ECHO makes and prints each one, so you can watch
 the on / off flow without the real display.
@@ -14,12 +14,20 @@ Then point ECHO at it in .env:
 
 GET /api/display returns the current state and the call log, handy for
 scripted checks.
+
+It also accepts the hologram employee upload (see hologram_sync.py):
+
+    HOLOGRAM_SYNC_URL=http://<this-machine-ip>:8765/api/employees
+
+Received photos are saved to ./mock_hologram_photos/<employee_id>.jpg so
+you can check them by eye. GET /api/employees lists what arrived.
 """
 
 from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 from flask import Flask, jsonify, request
 
@@ -53,6 +61,36 @@ def create_app(api_key: str) -> Flask:
     def status():
         return jsonify(current=current, log=log)
 
+    employees: dict[str, dict] = {}
+    photo_dir = Path("mock_hologram_photos")
+
+    @app.post("/api/employees")
+    def employee_upload():
+        if api_key and request.headers.get("X-API-Key") != api_key:
+            print("[mock-hologram] 401 bad or missing X-API-Key", flush=True)
+            return jsonify(error="invalid api key"), 401
+        emp_id = (request.form.get("employee_id") or "").strip()
+        name = (request.form.get("full_name") or "").strip()
+        if not emp_id or not name:
+            return jsonify(error="employee_id and full_name required"), 400
+        img = request.files.get("image")
+        size = 0
+        if img is not None:
+            data = img.read()
+            size = len(data)
+            photo_dir.mkdir(exist_ok=True)
+            (photo_dir / f"{emp_id}.jpg").write_bytes(data)
+        employees[emp_id] = {"full_name": name, "image_bytes": size,
+                             "at": time.strftime("%H:%M:%S")}
+        print(f"[mock-hologram] got {emp_id} {name} "
+              f"({size} byte photo)" if size else
+              f"[mock-hologram] got {emp_id} {name} (no photo)", flush=True)
+        return jsonify(ok=True)
+
+    @app.get("/api/employees")
+    def employee_list():
+        return jsonify(employees)
+
     return app
 
 
@@ -63,7 +101,8 @@ def main():
     p.add_argument("--key", default="test-key",
                    help="expected X-API-Key ('' disables the check)")
     a = p.parse_args()
-    print(f"[mock-display] listening on http://{a.host}:{a.port}/api/display "
+    print(f"[mock] listening on http://{a.host}:{a.port}  "
+          f"display: /api/display  hologram: /api/employees  "
           f"(key={a.key!r})", flush=True)
     create_app(a.key).run(host=a.host, port=a.port)
 

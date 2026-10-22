@@ -4,7 +4,8 @@
 
 | Data | Where | Notes |
 |---|---|---|
-| Face embeddings | `faces.db` table `face_embeddings` | 512-d float32 vectors. **No raw photos.** Photos exist only in RAM during capture |
+| Face embeddings | `faces.db` table `face_embeddings` | 512-d float32 vectors |
+| Face photo | `faces.db` table `employee_photos` | **One JPEG face crop per person**, kept so it can be sent to the hologram app. Saved at registration, or on first recognition for people registered earlier (`HOLOGRAM_BACKFILL_ON_RECOGNITION`). Deleted with the employee. Other camera frames still exist only in RAM |
 | Names + emp_ids | `faces.db` table `employees` | Whatever the user / admin typed in |
 | Interactions | `faces.db` table `interactions` | `emp_id` + timestamp per recognition |
 | Projects | `faces.db` table `projects` | Admin-curated content for the idle dashboard |
@@ -23,6 +24,10 @@
   (`ipapi.co` / `ipwho.is` / `ip-api.com`) for the city name on the
   dashboard. Each request reveals the kiosk's public IP and gets
   back coordinates + city.
+- **Hologram app (when `HOLOGRAM_SYNC_URL` is set)**: each employee's
+  ID, name and face photo are sent to that URL. See `hologram_sync.py`.
+- **Display app (when `DISPLAY_API_URL` is set)**: the ID and name of
+  the person in the current session, plus an "off" when it ends.
 - **No analytics, telemetry, or third-party scripts.**
 
 For a fully-local deployment:
