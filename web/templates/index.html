@@ -42,6 +42,18 @@
       </div>
     </div>
 
+    <!-- Static Leon poster on the left side of the idle screen. Non-
+         interactive; his introduction is spoken as part of each recognised
+         person's greeting. -->
+    <figure class="leon-poster" aria-label="Leon, the Infosys AI Mascot">
+      <img src="{{ url_for('static', filename='leon-mascot.webp') }}"
+           alt="Leon, the Infosys AI Mascot">
+      <figcaption class="leon-poster-caption">
+        <span class="leon-poster-name">Leon</span>
+        <span class="leon-poster-role">Infosys AI Mascot</span>
+      </figcaption>
+    </figure>
+
     <div class="stat-row">
       <div class="card glass weather-card">
         <span class="weather-sun" aria-hidden="true">

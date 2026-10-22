@@ -22,11 +22,62 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import re
 import socket
 import time
 from typing import Iterable
 
 import requests
+
+
+# ---- reply post-processing -----------------------------------------------
+# LLM answers -- especially from OpenAI's web_search_preview -- come back
+# with markdown formatting, citation markers (【1】, [source†1]) and inline
+# URLs. Passed to the SPA that renders as raw text (asterisks, brackets,
+# huge http:// blobs) AND to Piper TTS which literally reads "star star
+# bold star star". Strip everything to plain speakable prose before the
+# reply leaves the client.
+
+_MD_IMG_RE     = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+_MD_LINK_RE    = re.compile(r"\[([^\]]+)\]\([^)]+\)")            # [text](url)
+_CITATION_RE   = re.compile(r"【[^】]*】|\[\^\d+\]|\[\d+\]")     # 【1】, [^1], [1]
+_MD_BOLD_RE    = re.compile(r"\*\*([^*\n]+)\*\*|__([^_\n]+)__")
+_MD_ITAL_RE    = re.compile(
+    r"(?<![*_\w])\*([^*\n]+)\*(?!\*)|(?<![*_\w])_([^_\n]+)_(?!_)"
+)
+_MD_CODE_RE    = re.compile(r"`([^`\n]+)`")
+_MD_HEADER_RE  = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+", flags=re.MULTILINE)
+_MD_BULLET_RE  = re.compile(r"^[ \t]{0,3}(?:[-*+]|\d+\.)[ \t]+", flags=re.MULTILINE)
+_MD_HRULE_RE   = re.compile(r"^[ \t]{0,3}(?:---|\*\*\*|___)[ \t]*$", flags=re.MULTILINE)
+_SOURCES_TAIL_RE = re.compile(
+    r"\n[ \t]*(?:sources?|references?|citations?|further reading)"
+    r"[ \t]*[:\n].*",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_URL_RE        = re.compile(r"https?://\S+")
+_MULTI_WS_RE   = re.compile(r"[ \t]{2,}")
+_MULTI_NL_RE   = re.compile(r"\n{3,}")
+
+
+def _strip_markdown(text: str) -> str:
+    """Turn a markdown-formatted LLM reply into plain speakable text."""
+    if not text:
+        return text
+    s = text
+    s = _MD_IMG_RE.sub("", s)
+    s = _MD_LINK_RE.sub(r"\1", s)          # keep link text, drop URL
+    s = _CITATION_RE.sub("", s)
+    s = _MD_BOLD_RE.sub(lambda m: m.group(1) or m.group(2), s)
+    s = _MD_ITAL_RE.sub(lambda m: m.group(1) or m.group(2), s)
+    s = _MD_CODE_RE.sub(r"\1", s)
+    s = _MD_HEADER_RE.sub("", s)
+    s = _MD_BULLET_RE.sub("", s)
+    s = _MD_HRULE_RE.sub("", s)
+    s = _SOURCES_TAIL_RE.sub("", s)
+    s = _URL_RE.sub("", s)                 # bare URLs -> gone (TTS-unfriendly)
+    s = _MULTI_WS_RE.sub(" ", s)
+    s = _MULTI_NL_RE.sub("\n\n", s)
+    return s.strip()
 
 import config
 
@@ -344,6 +395,10 @@ class ChatClient:
         except Exception as exc:  # roll back budget on error
             self.budget._used[emp_id] = max(0, self.budget._used.get(emp_id, 1) - 1)
             raise ChatBackendError(f"{backend.label}: {exc}") from exc
+        # Turn markdown/citations/URLs into plain speakable prose. Applies
+        # to both OpenAI (esp. web_search_preview output) and Ollama, since
+        # any backend can decide to format the reply.
+        answer = _strip_markdown(answer)
         self._last_label = backend.label
         return answer
 

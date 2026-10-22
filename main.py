@@ -380,8 +380,11 @@ class Greeter:
             return False
         self._last_greeted[emp_id] = now
         welcome = self._pick_welcome(emp_id, name)
+        leon = getattr(config, "LEON_INTRODUCTION", "").strip()
         tap = getattr(config, "GREET_TAP_PROMPT", "").strip()
-        msg = f"{welcome} {tap}".strip() if tap else welcome
+        # Order: personal welcome -> Leon introduction -> tap-to-speak.
+        # (Leon can also be replayed anytime via the idle "Meet Leon" logo.)
+        msg = " ".join(p for p in (welcome, leon, tap) if p)
         print(f"[GREET] {msg}", flush=True)
         # Push the toast + person state from the TTS worker thread so
         # the UI update lands exactly when audio starts playing, not
@@ -562,6 +565,11 @@ class CameraWorker(threading.Thread):
         unknown_streak = 0
         last_interaction_at = time.time() if kiosk_state == "ACTIVE" else 0.0
         activated_at = time.time() if kiosk_state == "ACTIVE" else 0.0
+        # 0.0 until the camera detects any face in this ACTIVE session.
+        # If it stays 0.0 past NO_FACE_AUTO_IDLE_SEC, we assume the wake
+        # was a false positive (Vosk hearing ambient chatter) and quietly
+        # drop back to the dashboard.
+        last_face_seen_at = 0.0
         seen_in_session: set[str] = set()
         session_id = uuid.uuid4().hex[:12] if kiosk_state == "ACTIVE" else ""
         last_known_emp_id = "anon"
@@ -596,6 +604,7 @@ class CameraWorker(threading.Thread):
                 kiosk_state = "ACTIVE"
                 activated_at = time.time()
                 last_interaction_at = activated_at
+                last_face_seen_at = 0.0     # reset for the new session
                 seen_in_session = set()
                 session_id = uuid.uuid4().hex[:12]
                 self._session_primary = None
@@ -701,6 +710,10 @@ class CameraWorker(threading.Thread):
                 dets = self.pipe.detect(frame, config.DETECTOR_SCORE_THRESHOLD,
                                         config.DETECTOR_NMS_IOU)
                 biggest = largest_detection(dets)
+                # Note any face at all -- even before quality/liveness --
+                # so the no-face-after-wake auto-idle timer resets.
+                if biggest is not None and kiosk_state == "ACTIVE":
+                    last_face_seen_at = time.time()
 
             if kiosk_state == "ACTIVE" and not chat_busy:
                 # Liveness can be turned off entirely via config; when
@@ -854,15 +867,41 @@ class CameraWorker(threading.Thread):
                     and (time.time() - getattr(self, "_last_chat_at", 0))
                         <= config.CHAT_KEEPALIVE_SEC
                 )
+                # ECHO still speaking (greeting / reply) or a person still in
+                # front of the camera both count as engagement, so the idle
+                # timer can't cut a greeting off mid-sentence or drop someone
+                # who is standing there about to start talking.
+                tts_speaking = not self.tts.wait_idle(timeout=0)
+                face_present = bool(
+                    last_face_seen_at
+                    and time.time() - last_face_seen_at
+                        <= getattr(config, "FACE_PRESENT_KEEPALIVE_SEC", 3)
+                )
                 user_engaged = (
                     snap.get("register_open")
                     or snap.get("listening")
                     or chat_active
+                    or tts_speaking
+                    or face_present
                 )
                 if user_engaged:
                     last_interaction_at = time.time()
                 idle_for = (time.time() - last_interaction_at) if last_interaction_at else 0
                 force_idle = self.idle_event.is_set()
+
+                # No-face-after-wake: if we've been ACTIVE for
+                # NO_FACE_AUTO_IDLE_SEC and the camera never saw anyone,
+                # this was almost certainly a false wake -- close silently.
+                # Suppressed while the user is engaged (register overlay,
+                # mic listening, chat pending) so an early tap-then-speak
+                # doesn't get cut off.
+                no_face_timeout = (
+                    not user_engaged
+                    and activated_at
+                    and last_face_seen_at == 0.0
+                    and (time.time() - activated_at)
+                        >= getattr(config, "NO_FACE_AUTO_IDLE_SEC", 5)
+                )
 
                 # While ECHO is still reading a chat reply aloud, hold the
                 # idle clock at "now" so the 30s goodbye window only starts
@@ -890,7 +929,7 @@ class CameraWorker(threading.Thread):
                     self.greeter.say(farewell)
                     self._goodbye_exit = True
 
-                if (force_idle or self._goodbye_exit
+                if (force_idle or self._goodbye_exit or no_face_timeout
                         or idle_for >= config.IDLE_AFTER_LAST_INTERACTION_SEC
                         or (activated_at and time.time() - activated_at >= config.ACTIVE_SESSION_MAX_SEC)):
                     if force_idle:
@@ -931,6 +970,7 @@ class CameraWorker(threading.Thread):
                         self.listener.suppress(
                             config.WAKE_COOLDOWN_AFTER_IDLE_SEC)
                     reason = ("user closed" if force_idle
+                              else "no face after wake" if no_face_timeout
                               else "chat idle goodbye" if graceful
                               else f"idle {idle_for:.0f}s")
                     print(f"[state] ACTIVE -> IDLE ({reason}, "
@@ -1616,6 +1656,16 @@ def main():
         if chat_voice is not None:
             chat_voice.stop()
 
+    def request_leon_intro():
+        """User tapped the 'Meet Leon' logo on the idle dashboard."""
+        text = getattr(config, "LEON_INTRODUCTION", "").strip()
+        if not text:
+            return
+        # Cut any in-flight TTS so Leon's line starts cleanly.
+        tts.interrupt()
+        print(f"[leon] intro requested", flush=True)
+        greeter.say(text)
+
     app = create_app(state, frames, db,
                      request_wake=request_wake,
                      request_idle=request_idle,
@@ -1623,7 +1673,8 @@ def main():
                      request_register_skip=request_register_skip,
                      request_chat=request_chat,
                      listen_start=listen_start,
-                     listen_stop=listen_stop)
+                     listen_stop=listen_stop,
+                     request_leon_intro=request_leon_intro)
 
     host = getattr(config, "KIOSK_HOST", "127.0.0.1")
     port = int(os.environ.get("KIOSK_PORT", getattr(config, "KIOSK_PORT", 8080)))

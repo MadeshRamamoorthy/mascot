@@ -855,3 +855,52 @@ body[data-listening="true"] .camera-placeholder { display: none; }
   font-weight: 600;
   cursor: pointer;
 }
+
+/* ---------- Leon poster (left-side static picture on idle) ---------- */
+
+.idle { position: relative; }
+
+/* Everything under the header shifts right so it doesn't overlap the
+   poster. Header stays full-width (its clock is right-aligned). */
+.idle > *:not(.idle-header):not(.leon-poster) {
+  margin-left: 320px;
+}
+
+.leon-poster {
+  position: absolute;
+  left: 32px;
+  top: 96px;                /* below the 64px header + margin */
+  width: 280px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  pointer-events: none;     /* purely decorative */
+  z-index: 1;
+}
+.leon-poster img {
+  width: 100%;
+  height: auto;
+  border-radius: 22px;
+  filter: drop-shadow(0 0 28px rgba(0, 212, 255, 0.32));
+}
+.leon-poster-caption {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+.leon-poster-name {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+}
+.leon-poster-role {
+  font-size: 12px;
+  color: var(--fg-dim);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}

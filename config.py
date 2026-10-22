@@ -32,6 +32,10 @@ COSINE_MATCH_THRESHOLD = 0.42  # ArcFace: 0.35-0.45 typical; lower => looser mat
 GREET_COOLDOWN_SEC = 60
 # Appended to a recognised person's greeting so they know how to start
 # talking. Set to "" to disable.
+# Spoken after the personal welcome and BEFORE GREET_TAP_PROMPT --
+# introduces Leon (the sibling AI persona) to every recognised visitor
+# so they know he exists. Set to "" to disable.
+LEON_INTRODUCTION = "I am my distant cousin of Leon, Infosys AI Mascot."
 GREET_TAP_PROMPT = "Tap to speak to chat with me!"
 
 # Camera
@@ -185,7 +189,11 @@ WAKE_WORD = "hello echo scope"        # primary phrase shown in the UI
 # "hello echo" / "hi echo" alongside the full "hello echo scope" -- the
 # small Vosk model is more reliable on the shorter phrases, and all are
 # natural to say.
-WAKE_WORD_ALIASES = ["hello echo", "hi echo"]
+# Dropped "hi echo": in production logs Vosk was finalising ambient
+# chatter as "hi echo ..." often enough to wake the kiosk to an empty
+# room. Keeping "hello echo" (still short) and the full "hello echo
+# scope" (via WAKE_WORD).
+WAKE_WORD_ALIASES = ["hello echo"]
 WAKE_WORD_SAMPLERATE = 16000
 WAKE_WORD_BLOCKSIZE = 8000
 # Vosk's grammar-restricted recognizer forces EVERY utterance onto one of
@@ -204,11 +212,19 @@ WAKE_COOLDOWN_AFTER_IDLE_SEC = float(
 # touchscreen produces ghost taps.
 WAKE_ON_TOUCH = os.environ.get("WAKE_ON_TOUCH", "true").lower() in (
     "1", "true", "yes", "on")
-# Drop back to IDLE this long after the last *interaction* (a new person
-# greeted, an unknown face in frame, or a registration completing). A
-# recognised person who keeps standing in front of the camera does NOT
-# reset this timer -- 10 s after the last new event we sleep.
-IDLE_AFTER_LAST_INTERACTION_SEC = 30
+# Drop back to IDLE this long after the last activity. ECHO speaking and
+# a face in front of the camera both count as activity, so this countdown
+# only starts once the greeting has finished AND the person has stepped
+# away (or there's no chat / registration / mic in progress).
+IDLE_AFTER_LAST_INTERACTION_SEC = 60
+# A face seen within this many seconds counts as "someone is still here"
+# and keeps the screen ACTIVE so they can start interacting.
+FACE_PRESENT_KEEPALIVE_SEC = 3
+# If the kiosk wakes (voice or touch) but the camera detects NO face at
+# all for this many seconds, it closes silently back to the dashboard.
+# Handles false wakes -- Vosk mis-hearing ambient chatter as a wake
+# phrase -- so the kiosk doesn't sit ACTIVE talking to an empty room.
+NO_FACE_AUTO_IDLE_SEC = 5
 # While there's chat activity, keep the kiosk in ACTIVE mode for at
 # least this long after the last chat message. Gives the user time to
 # read the answer and ask a follow-up without the kiosk dropping out.

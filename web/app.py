@@ -29,6 +29,7 @@ def create_app(
     request_chat: Callable[[str], None],
     listen_start: Callable[[], None],
     listen_stop: Callable[[], None],
+    request_leon_intro: Callable[[], None] | None = None,
 ) -> Flask:
     app = Flask(
         __name__,
@@ -121,6 +122,14 @@ def create_app(
         if not emp_id or not name:
             return ("emp_id and name required", 400)
         request_register({"emp_id": emp_id, "name": name})
+        return ("", 204)
+
+    @app.route("/api/leon/introduce", methods=["POST"])
+    def api_leon_introduce():
+        """Idle-dashboard 'Meet Leon' logo tapped -> speak the intro."""
+        if request_leon_intro is None:
+            return ("leon intro not wired", 503)
+        request_leon_intro()
         return ("", 204)
 
     @app.route("/api/register/skip", methods=["POST"])
