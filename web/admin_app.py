@@ -167,12 +167,14 @@ def create_admin_app(
         if not check_admin_auth():
             return request_admin_auth()
         rows = db.list_employees()
+        with_photo = db.photo_ids()
         return jsonify([
             {"emp_id": r[0], "name": r[1], "samples": r[2],
              "created_at": r[3], "profile_url": r[4] or "",
              "custom_welcome": r[5] or "",
              "welcome_cache": r[6] or "",
-             "id_ok": is_emp_id(r[0])}
+             "id_ok": is_emp_id(r[0]),
+             "has_photo": r[0] in with_photo}
             for r in rows
         ])
 

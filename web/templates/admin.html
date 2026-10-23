@@ -17,6 +17,8 @@
     width: 100%; padding: 4px 8px; font-size: 14px; box-sizing: border-box; }
   button { cursor: pointer; padding: 4px 12px; }
   .danger { color: #b00; }
+  .photo-yes { color: #1a7f37; font-weight: 600; }
+  .photo-no { color: #b00; }
   #idmig-table input { width: 90px; font-family: monospace; text-transform: uppercase; }
   #idmig-table tr.keep td { color: #888; }
   #idmig-table tr.bad input { border-color: #b00; background: #fee; }
@@ -129,7 +131,7 @@
 <h2>Employees (registered faces)</h2>
 <table id="employees-table">
   <thead><tr>
-    <th>ID</th><th>Name</th><th>Samples</th>
+    <th>ID</th><th>Name</th><th>Samples</th><th>Photo</th>
     <th>Profile URL</th><th>Welcome (custom or generated)</th><th></th>
   </tr></thead>
   <tbody></tbody>
@@ -332,7 +334,7 @@ async function refresh() {
     const etb = document.querySelector("#employees-table tbody");
     etb.innerHTML = "";
     if (!employees.length) {
-      etb.innerHTML = '<tr><td colspan="6" class="empty">No employees registered yet.</td></tr>';
+      etb.innerHTML = '<tr><td colspan="7" class="empty">No employees registered yet.</td></tr>';
     } else for (const e of employees) {
       const tr = document.createElement("tr");
       const url = (e.profile_url || "").trim();
@@ -351,6 +353,7 @@ async function refresh() {
       tr.innerHTML = `<td><code>${escape(e.emp_id)}</code></td>
         <td>${escape(e.name)}<br><span class="sub">${e.samples} samples</span></td>
         <td>${e.samples}</td>
+        <td>${e.has_photo ? '<span class="photo-yes" title="Face photo stored">✓ Yes</span>' : '<span class="photo-no" title="No photo yet — saved the next time this person is recognised or registered">✗ No</span>'}</td>
         <td>${urlCell}</td>
         <td>${welcomeCell}</td>
         <td>
