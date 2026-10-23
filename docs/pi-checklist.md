@@ -126,7 +126,7 @@ sample cap. Duplicate names are only reported.
 - [ ] Reviewed the dry-run report
 - [ ] Applied the fixes
 - [ ] For each duplicate name, kept one ID and removed the rest: `python admin.py delete <id>`
-- [ ] Employee ID format matches the display system (e.g. `E0001`)
+- [ ] Employee ID format matches the display system (`E0001`): admin → Employees → **Employee IDs → hologram format** → Preview → Apply (one-time; new registrations are numbered automatically)
 - [ ] Exported `employees.csv` for the display-side DB alignment
 
 ---

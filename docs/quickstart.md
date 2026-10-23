@@ -44,8 +44,9 @@ aplay /usr/share/sounds/alsa/Front_Center.wav  # speaker works?
    wake-word grammar accepts aliases).
 3. Look at the screen. You should hear "Hello! Lovely to see you."
    and see your face inside a yellow "Unknown" bounding box.
-4. The registration overlay pops after ~1 s. Fill in `emp_id` +
-   name → tap **Register** → follow the pose prompts.
+4. The registration overlay pops after ~1 s. Type your
+   name → tap **Register** → follow the pose prompts. Your employee ID
+   (`E0001`, `E0002` …) is assigned automatically.
 5. On subsequent wakes, the box turns green and the kiosk greets you
    by name.
 

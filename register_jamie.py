@@ -6,12 +6,12 @@ Usage on the Pi (from the project root, venv active):
     # or with multiple angles:
     python register_jamie.py jamie_front.jpg jamie_left.jpg
 
-Registers a new employee with emp_id=EMP_ID / name=NAME below, using the
+Registers a new employee with name=NAME (the E0001-style ID is generated) below, using the
 photo(s) you point at, then pins CUSTOM_WELCOME as the exact greeting the
 kiosk speaks whenever Jamie is recognised (overrides any LLM-generated
-welcome). Safe to re-run: appends embeddings if the emp_id already exists.
+welcome). Safe to re-run: appends embeddings if that name is already registered.
 
-Edit EMP_ID / NAME / CUSTOM_WELCOME below to change any of those.
+Edit NAME / CUSTOM_WELCOME below to change any of those.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from photo_register import register_from_photos
 import config
 
 
-EMP_ID = "jamie"
 NAME = "Jamie"
 CUSTOM_WELCOME = (
     "Hi Jamie, welcome to Echo AI Lab! Great to have you with us today. "
@@ -51,14 +50,17 @@ def main(paths: list[str]) -> int:
     db = FaceDB()
     pipe = HailoFacePipeline(config.DETECTOR_HEF, config.EMBEDDER_HEF)
     try:
-        result = register_from_photos(db, pipe, EMP_ID, NAME, blobs)
+        # Re-runs add to the existing person; otherwise a new E-number.
+        result = register_from_photos(
+            db, pipe, db.find_emp_id_by_name(NAME), NAME, blobs)
         print(f"register_from_photos: {result}")
         if not result.get("ok"):
             return 1
-        db.set_employee_profile(EMP_ID, custom_welcome=CUSTOM_WELCOME)
-        print(f"custom_welcome set for {EMP_ID}.")
+        emp_id = result["emp_id"]
+        db.set_employee_profile(emp_id, custom_welcome=CUSTOM_WELCOME)
+        print(f"custom_welcome set for {emp_id}.")
         # Quick read-back so you can eyeball the row.
-        profile = db.get_employee_profile(EMP_ID)
+        profile = db.get_employee_profile(emp_id)
         print(f"profile: {profile}")
     finally:
         try:

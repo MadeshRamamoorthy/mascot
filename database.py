@@ -1,12 +1,39 @@
 from __future__ import annotations
 
+import re
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
 from config import DB_PATH, EMBEDDING_DIM
+
+# Employee IDs follow the hologram app's format: capital E + 4 digits
+# (E0001, E0002 ...). New IDs are generated here, never typed by a user.
+EMP_ID_PREFIX = "E"
+EMP_ID_DIGITS = 4
+_EMP_ID_OK = re.compile(rf"{EMP_ID_PREFIX}\d{{{EMP_ID_DIGITS},}}")
+# Anything that is an E-number in disguise: "e1", "E7", "e0042" ...
+_EMP_ID_LOOSE = re.compile(rf"[{EMP_ID_PREFIX}{EMP_ID_PREFIX.lower()}]0*(\d+)")
+
+
+def format_emp_id(n: int) -> str:
+    return f"{EMP_ID_PREFIX}{n:0{EMP_ID_DIGITS}d}"
+
+
+def is_emp_id(value: str) -> bool:
+    """True for an ID already in the E0001 format."""
+    return bool(_EMP_ID_OK.fullmatch(value or ""))
+
+
+def emp_id_number(value: str) -> int | None:
+    """Numeric part of an E-style ID, tolerating case / short padding
+    ("e7" -> 7). None for legacy IDs like "madesh"."""
+    m = _EMP_ID_LOOSE.fullmatch((value or "").strip())
+    return int(m.group(1)) if m else None
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS employees (
@@ -81,7 +108,11 @@ class FaceDB:
         # request threads (admin endpoints) and the camera worker
         # thread. SQLite itself serialises writes internally, and our
         # workload is light enough that lock contention is a non-issue.
+        self.path = Path(path)
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        # Serialises ID allocation / migration between threads of this
+        # process; BEGIN IMMEDIATE covers the other process (kiosk vs admin).
+        self._id_lock = threading.Lock()
         self.conn.execute("PRAGMA foreign_keys = ON")
         # WAL + busy_timeout: two processes (kiosk + standalone admin) share
         # this file. WAL allows concurrent readers + one writer without
@@ -132,6 +163,191 @@ class FaceDB:
                 (emp_id, _to_blob(emb)),
             )
         self.conn.commit()
+
+    # ---- employee IDs: E0001 format, generated here -----------------------
+
+    def _begin_write(self) -> None:
+        """Take the write lock up front (sqlite would otherwise only grab
+        it at the first INSERT, after the ID was already chosen)."""
+        if self.conn.in_transaction:
+            self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+
+    def _next_emp_number(self) -> int:
+        """Highest E-number in use + 1 (legacy IDs like "madesh" are
+        ignored). Caller holds the write lock."""
+        top = 0
+        for (eid,) in self.conn.execute("SELECT emp_id FROM employees"):
+            n = emp_id_number(eid)
+            if n is not None and n > top:
+                top = n
+        return top + 1
+
+    def next_emp_id(self) -> str:
+        """Preview of the next ID. add_employee_auto() allocates for real."""
+        return format_emp_id(self._next_emp_number())
+
+    def add_employee_auto(self, name: str,
+                          embeddings: Iterable[np.ndarray]) -> str:
+        """Create a new employee with the next free E-number and return
+        it. Pick + insert happen in one write transaction, so the kiosk
+        and the admin app can't hand out the same ID."""
+        embeddings = list(embeddings)
+        with self._id_lock:
+            self._begin_write()
+            try:
+                emp_id = format_emp_id(self._next_emp_number())
+                self.conn.execute(
+                    "INSERT INTO employees (emp_id, name) VALUES (?, ?)",
+                    (emp_id, name),
+                )
+                for emb in embeddings:
+                    self.conn.execute(
+                        "INSERT INTO face_embeddings (emp_id, embedding) "
+                        "VALUES (?, ?)", (emp_id, _to_blob(emb)),
+                    )
+                self.conn.commit()
+            except BaseException:
+                self.conn.rollback()
+                raise
+        return emp_id
+
+    def find_emp_id_by_name(self, name: str) -> str | None:
+        """Employee with exactly this name (case-insensitive), if any.
+        When several share it, the oldest wins."""
+        row = self.conn.execute(
+            "SELECT emp_id FROM employees WHERE lower(name) = lower(?) "
+            "ORDER BY created_at, emp_id LIMIT 1", (name.strip(),),
+        ).fetchone()
+        return row[0] if row else None
+
+    def data_version(self) -> int:
+        """Changes whenever ANOTHER connection (e.g. the admin app) commits.
+        The kiosk polls it to know when to reload its in-memory gallery."""
+        return self.conn.execute("PRAGMA data_version").fetchone()[0]
+
+    # ---- one-off migration of legacy IDs to the E0001 format -------------
+
+    def plan_emp_id_migration(self, overrides: dict[str, str] | None = None
+                              ) -> list[dict]:
+        """Work out old -> new IDs without touching the DB.
+
+        Rules, in priority order:
+          1. an ID the admin typed in `overrides` wins;
+          2. IDs that are already E-numbers keep their number
+             (E0001 stays, "e7" becomes E0007);
+          3. everyone else gets the next free number, oldest first.
+        If two rows claim the same number the older one keeps it.
+
+        Returns [{old, name, new, action, reason}] oldest first. Raises
+        ValueError on a bad / duplicate override.
+        """
+        overrides = {k: (v or "").strip().upper()
+                     for k, v in (overrides or {}).items() if (v or "").strip()}
+        rows = self.conn.execute(
+            "SELECT emp_id, name FROM employees ORDER BY created_at, emp_id"
+        ).fetchall()
+        known = {r[0] for r in rows}
+        for old, new in overrides.items():
+            if old not in known:
+                raise ValueError(f"unknown employee {old!r}")
+            if not is_emp_id(new):
+                raise ValueError(
+                    f"{new!r} is not in the format "
+                    f"{format_emp_id(1)} ({EMP_ID_PREFIX} + at least "
+                    f"{EMP_ID_DIGITS} digits)")
+        dupes = {v for v in overrides.values()
+                 if list(overrides.values()).count(v) > 1}
+        if dupes:
+            raise ValueError(f"same new ID used twice: {sorted(dupes)}")
+
+        target: dict[str, str] = {}
+        reason: dict[str, str] = {}
+        taken: set[str] = set()
+        for old, new in overrides.items():           # 1. manual
+            target[old], reason[old] = new, "set by admin"
+            taken.add(new)
+        for old, _name in rows:                      # 2. already E-style
+            if old in target:
+                continue
+            n = emp_id_number(old)
+            if n is None:
+                continue
+            cand = format_emp_id(n)
+            if cand in taken:
+                continue                             # lost the tie -> step 3
+            target[old] = cand
+            taken.add(cand)
+            reason[old] = ("already in format" if cand == old
+                           else "normalised")
+        top = max([emp_id_number(t) or 0 for t in taken] or [0])
+        for old, _name in rows:                      # 3. new numbers
+            if old in target:
+                continue
+            top += 1
+            while format_emp_id(top) in taken:
+                top += 1
+            target[old] = format_emp_id(top)
+            taken.add(target[old])
+            reason[old] = "new number"
+        return [{
+            "old": old, "name": name, "new": target[old],
+            "action": "keep" if old == target[old] else "rename",
+            "reason": reason[old],
+        } for old, name in rows]
+
+    def backup_to(self, dest: Path | None = None) -> Path:
+        """Consistent copy of the whole DB (safe while the kiosk is running)."""
+        dest = Path(dest) if dest else self.path.with_name(
+            f"{self.path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        out = sqlite3.connect(str(dest))
+        try:
+            self.conn.backup(out)
+        finally:
+            out.close()
+        return dest
+
+    def _rename_emp(self, old: str, new: str, resend: bool) -> None:
+        self.conn.execute(
+            "UPDATE employees SET emp_id = ?"
+            + (", hologram_synced_at = NULL, hologram_error = NULL"
+               if resend else "") + " WHERE emp_id = ?", (new, old))
+        for table in ("face_embeddings", "employee_photos", "interactions"):
+            self.conn.execute(
+                f"UPDATE {table} SET emp_id = ? WHERE emp_id = ?", (new, old))
+
+    def migrate_emp_ids(self, overrides: dict[str, str] | None = None) -> dict:
+        """Rename every employee to its planned E0001-style ID.
+
+        All-or-nothing: one transaction, preceded by a full backup. Two
+        phases (old -> temp -> final) so IDs can swap or chain safely.
+        Renamed people are marked "not sent" so the hologram app gets them
+        again under the new ID. Returns {changed, kept, backup, mapping}.
+        """
+        with self._id_lock:
+            plan = self.plan_emp_id_migration(overrides)
+            changes = [p for p in plan if p["action"] == "rename"]
+            result = {"changed": len(changes),
+                      "kept": len(plan) - len(changes),
+                      "backup": None,
+                      "mapping": [{"old": p["old"], "new": p["new"],
+                                   "name": p["name"]} for p in changes]}
+            if not changes:
+                return result
+            result["backup"] = str(self.backup_to())
+            self._begin_write()
+            try:
+                # Parent + child rows move together; check FKs at COMMIT.
+                self.conn.execute("PRAGMA defer_foreign_keys = ON")
+                for i, p in enumerate(changes):
+                    self._rename_emp(p["old"], f"__migrating_{i}__", False)
+                for i, p in enumerate(changes):
+                    self._rename_emp(f"__migrating_{i}__", p["new"], True)
+                self.conn.commit()
+            except BaseException:
+                self.conn.rollback()
+                raise
+        return result
 
     def add_embedding(self, emp_id: str, embedding: np.ndarray):
         self.conn.execute(

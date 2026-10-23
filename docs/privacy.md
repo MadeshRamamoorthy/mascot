@@ -6,7 +6,7 @@
 |---|---|---|
 | Face embeddings | `faces.db` table `face_embeddings` | 512-d float32 vectors |
 | Face photo | `faces.db` table `employee_photos` | **One JPEG face crop per person**, kept so it can be sent to the hologram app. Saved at registration, or on first recognition for people registered earlier (`HOLOGRAM_BACKFILL_ON_RECOGNITION`). Deleted with the employee. Other camera frames still exist only in RAM |
-| Names + emp_ids | `faces.db` table `employees` | Whatever the user / admin typed in |
+| Names + emp_ids | `faces.db` table `employees` | Name as typed; emp_id is generated (`E0001` format) |
 | Interactions | `faces.db` table `interactions` | `emp_id` + timestamp per recognition |
 | Projects | `faces.db` table `projects` | Admin-curated content for the idle dashboard |
 | Sessions | `faces.db` table `sessions` | Admin-curated content for the upcoming-session card |

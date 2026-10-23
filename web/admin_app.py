@@ -14,6 +14,7 @@ from typing import Callable
 
 from flask import Flask, jsonify, render_template, request
 
+from database import is_emp_id
 from web._auth import check_admin_auth, request_admin_auth
 
 
@@ -170,7 +171,8 @@ def create_admin_app(
             {"emp_id": r[0], "name": r[1], "samples": r[2],
              "created_at": r[3], "profile_url": r[4] or "",
              "custom_welcome": r[5] or "",
-             "welcome_cache": r[6] or ""}
+             "welcome_cache": r[6] or "",
+             "id_ok": is_emp_id(r[0])}
             for r in rows
         ])
 
@@ -248,10 +250,15 @@ def create_admin_app(
         """
         if not check_admin_auth():
             return request_admin_auth()
-        emp_id = (request.form.get("emp_id") or "").strip()
+        # The ID (E0001 ...) is generated. An existing emp_id may still be
+        # passed to add photos to that person; unknown IDs are rejected.
+        emp_id = (request.form.get("emp_id") or "").strip() or None
         name = (request.form.get("name") or "").strip()
-        if not emp_id or not name:
-            return ("emp_id and name required", 400)
+        if not name and not emp_id:
+            return ("name required", 400)
+        if emp_id and not db.employee_exists(emp_id):
+            return (f"unknown employee {emp_id}", 400)
+        name = name or db.get_name(emp_id)
         photos = request.files.getlist("photos")
         if not photos:
             return ("at least one photo file required", 400)
@@ -271,9 +278,56 @@ def create_admin_app(
                 pass
 
         if result.get("ok"):
-            _send_to_hologram(emp_id)
+            _send_to_hologram(result["emp_id"])
         status = 200 if result.get("ok") else 400
         return jsonify(result), status
+
+    # -------- employee-ID migration (legacy IDs -> E0001 format) --------
+
+    def _mig_overrides():
+        body = request.get_json(silent=True) or {}
+        ov = body.get("overrides") or {}
+        if not isinstance(ov, dict):
+            raise ValueError("overrides must be an object {old_id: new_id}")
+        return {str(k): str(v) for k, v in ov.items()}
+
+    @app.route("/api/employee-ids/preview", methods=["POST"])
+    def emp_ids_preview():
+        """Dry run: the old -> new mapping the migration would apply.
+        Nothing is written. Body: {"overrides": {"madesh": "E0001"}}."""
+        if not check_admin_auth():
+            return request_admin_auth()
+        try:
+            plan = db.plan_emp_id_migration(_mig_overrides())
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        return jsonify(
+            plan=plan,
+            to_change=sum(1 for p in plan if p["action"] == "rename"),
+            next_id=db.next_emp_id())
+
+    @app.route("/api/employee-ids/migrate", methods=["POST"])
+    def emp_ids_migrate():
+        """Apply the migration: one transaction, DB backed up first. The
+        body must carry "confirm": true so a stray POST can't rename people."""
+        if not check_admin_auth():
+            return request_admin_auth()
+        body = request.get_json(silent=True) or {}
+        if body.get("confirm") is not True:
+            return jsonify(error="confirm: true required"), 400
+        try:
+            res = db.migrate_emp_ids(_mig_overrides())
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+        except Exception as exc:  # noqa: BLE001
+            return jsonify(error=f"migration failed, nothing changed: {exc}"), 500
+        # Renamed people are "not sent" now -> the hologram app gets them
+        # again under the new ID.
+        for m in res["mapping"]:
+            _send_to_hologram(m["new"])
+        print(f"[admin] employee-ID migration: {res['changed']} renamed, "
+              f"backup {res['backup']}", flush=True)
+        return jsonify(res)
 
     # -------- hologram bulk-upload ZIP ----------------------------------
 

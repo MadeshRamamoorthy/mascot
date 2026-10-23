@@ -394,10 +394,9 @@
   }
   $("#register-form")?.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    const emp_id = $("#register-emp-id").value.trim();
-    const name   = $("#register-name").value.trim();
-    if (!emp_id || !name) return;
-    postJSON("/api/register", { emp_id, name });
+    const name = $("#register-name").value.trim();
+    if (!name) return;
+    postJSON("/api/register", { name });
   });
   $("#register-skip")?.addEventListener("click", () => {
     post("/api/register/skip");

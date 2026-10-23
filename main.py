@@ -557,6 +557,8 @@ class CameraWorker(threading.Thread):
         emp_ids, names, matrix = self.db.load_all()
         print(f"Loaded {matrix.shape[0]} embeddings for {len(set(emp_ids))} employees.")
         self._photo_ids = self.db.photo_ids()
+        gallery_ver = self.db.data_version()
+        last_gallery_check = 0.0
         self._refresh_idle_data()
 
         # State machine local vars.
@@ -637,6 +639,22 @@ class CameraWorker(threading.Thread):
             if time.time() - last_idle_refresh > refresh_every:
                 last_idle_refresh = time.time()
                 self._refresh_idle_data()
+
+            # The standalone admin app edits faces.db from another process
+            # (ID migration, deletes, photo uploads). data_version only moves
+            # when ANOTHER connection commits, so this is a cheap poll; on a
+            # change reload the in-memory gallery instead of needing a restart.
+            if time.time() - last_gallery_check > 2.0:
+                last_gallery_check = time.time()
+                ver = self.db.data_version()
+                if ver != gallery_ver:
+                    gallery_ver = ver
+                    emp_ids, names, matrix = self.db.load_all()
+                    self._photo_ids = self.db.photo_ids()
+                    self._last_rec = None
+                    print(f"[gallery] reloaded after external DB change: "
+                          f"{matrix.shape[0]} embeddings, "
+                          f"{len(set(emp_ids))} employees", flush=True)
 
             # ---- process register requests (from web POST) ---
             try:
@@ -1015,7 +1033,6 @@ class CameraWorker(threading.Thread):
     # ---- registration flow (driven by /api/register) -----------------
 
     def _run_registration(self, req: dict):
-        emp_id = req["emp_id"]
         name = req["name"]
         # Close the form overlay immediately so the user can see the
         # camera feed during pose capture. Pose progress now renders
@@ -1026,7 +1043,11 @@ class CameraWorker(threading.Thread):
             register_message=f"Capturing your photo, {name}!",
         )
 
-        is_existing = self.db.employee_exists(emp_id)
+        # IDs are generated (E0001, E0002 ...), never typed. Someone who
+        # registers again under a name we already hold is only merged into
+        # that person if their face matches -- see the check below.
+        emp_id = self.db.find_emp_id_by_name(name)
+        is_existing = emp_id is not None
         if is_existing:
             existing_name = self.db.get_name(emp_id) or ""
             self.greeter.say(
@@ -1047,17 +1068,15 @@ class CameraWorker(threading.Thread):
         if is_existing:
             emp_ids, _, matrix = self.db.load_all()
             score = best_self_match(embeddings, emp_ids, matrix, emp_id)
-            if score < config.REREGISTER_MATCH_THRESHOLD:
-                self.state.update(
-                    register_step="form",
-                    register_message="Looks like a fresh face! Try a new Employee ID.",
-                    register_pose=None,
-                )
-                self.greeter.say("Let's set you up with a new profile.")
-                return
-            for e in embeddings:
-                self.db.add_embedding(emp_id, e)
-            self._save_registration_photo(emp_id)
+            if score >= config.REREGISTER_MATCH_THRESHOLD:
+                for e in embeddings:
+                    self.db.add_embedding(emp_id, e)
+                self._save_registration_photo(emp_id)
+            else:
+                # Same name, different face: a different person. They get
+                # their own ID rather than being refused.
+                is_existing = False
+        if is_existing:
             confirm = messages.random_registration_prompt(
                 "confirm_registration", name=name,
             )
@@ -1068,7 +1087,8 @@ class CameraWorker(threading.Thread):
                 register_message=f"Welcome back, {name}!",
             )
         else:
-            self.db.add_employee(emp_id, name, embeddings)
+            emp_id = self.db.add_employee_auto(name, embeddings)
+            print(f"[register] {name!r} -> {emp_id}", flush=True)
             self._save_registration_photo(emp_id)
             confirm = messages.random_registration_prompt(
                 "confirm_registration", name=name,

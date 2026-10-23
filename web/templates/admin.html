@@ -17,6 +17,10 @@
     width: 100%; padding: 4px 8px; font-size: 14px; box-sizing: border-box; }
   button { cursor: pointer; padding: 4px 12px; }
   .danger { color: #b00; }
+  #idmig-table input { width: 90px; font-family: monospace; text-transform: uppercase; }
+  #idmig-table tr.keep td { color: #888; }
+  #idmig-table tr.bad input { border-color: #b00; background: #fee; }
+  .idmig-banner { background: #fff7e0; border: 1px solid #f0d58c; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
   .empty { color: #888; padding: 24px; text-align: center; }
 
   /* tabs */
@@ -137,6 +141,30 @@
   directly, or paste a bio URL and click "Regenerate" to have the LLM
   pull a one-liner from the page.
 </p>
+<div style="margin-top: 18px; padding-top: 12px; border-top: 1px solid #eee;">
+  <h3 style="margin: 0 0 6px;">Employee IDs → hologram format (E0001)</h3>
+  <p class="sub" style="margin: 0 0 8px;">
+    One-time migration. Every employee gets an ID like <code>E0001</code> (capital E + 4 digits).
+    IDs already in that format are kept; the rest are numbered oldest first. Face samples,
+    photos, welcome lines and visit history move with the person. <b>Preview</b> changes nothing —
+    you can edit any new ID before applying (e.g. set Madesh to <code>E0001</code> to match the
+    hologram app). A full database backup is taken first. New registrations are numbered
+    automatically from then on.
+  </p>
+  <div id="idmig-banner" class="idmig-banner" hidden></div>
+  <button id="idmig-preview-btn" type="button">Preview migration</button>
+  <div id="idmig-panel" hidden style="margin-top: 10px;">
+    <table id="idmig-table">
+      <thead><tr><th>Name</th><th>Current ID</th><th>New ID</th><th>Why</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div style="margin-top: 10px;">
+      <button id="idmig-recalc-btn" type="button">Recalculate with my edits</button>
+      <button id="idmig-apply-btn" type="button">Apply migration</button>
+    </div>
+  </div>
+  <p id="idmig-status" class="sub" style="margin-top: 6px;"></p>
+</div>
 <div style="margin-top: 18px; padding-top: 12px; border-top: 1px solid #eee;">
   <a href="/api/hologram/export.zip" download><button type="button">Download hologram ZIP</button></a>
   <a href="/api/hologram/export.zip?include_no_photo=1" download><button type="button">Download incl. people without photo</button></a>
@@ -259,8 +287,8 @@ recognises them next time they walk up.</p>
 <form id="photo-register-form" style="margin-top: 16px;">
   <table>
     <tr>
-      <td style="width: 200px"><input type="text" name="emp_id" placeholder="Employee ID" required></td>
-      <td><input type="text" name="name" placeholder="Full name" required></td>
+      <td><input type="text" name="name" placeholder="Full name" required>
+        <p class="sub" style="margin-top: 4px;">The employee ID (E0001, E0002 …) is assigned automatically.</p></td>
     </tr>
     <tr>
       <td colspan="2">
@@ -292,6 +320,15 @@ async function refresh() {
   try {
     const employees = await fetch("/api/employees").then(r => r.json());
     window.__lastEmployees = employees;
+    const legacy = employees.filter(e => !e.id_ok).length;
+    const banner = document.getElementById("idmig-banner");
+    if (legacy) {
+      banner.hidden = false;
+      banner.textContent = `${legacy} of ${employees.length} employee IDs are not in the E0001 format. ` +
+        `Use "Preview migration" below to fix them.`;
+    } else {
+      banner.hidden = true;
+    }
     const etb = document.querySelector("#employees-table tbody");
     etb.innerHTML = "";
     if (!employees.length) {
@@ -591,6 +628,105 @@ document.getElementById("add-session").addEventListener("submit", async (ev) => 
   });
   f.reset(); refresh();
 });
+// ---- employee-ID migration ---------------------------------------------
+const idmig = {
+  status: () => document.getElementById("idmig-status"),
+  panel: () => document.getElementById("idmig-panel"),
+  // What the admin has typed, keyed by current ID -> {old: new}.
+  edits() {
+    const out = {};
+    document.querySelectorAll("#idmig-table tbody tr").forEach(tr => {
+      out[tr.dataset.old] = tr.querySelector("input").value.trim().toUpperCase();
+    });
+    return out;
+  },
+  render(plan) {
+    const tb = document.querySelector("#idmig-table tbody");
+    tb.innerHTML = "";
+    for (const p of plan) {
+      const tr = document.createElement("tr");
+      tr.dataset.old = p.old;
+      tr.className = p.action;
+      tr.innerHTML = `<td>${escape(p.name)}</td><td><code>${escape(p.old)}</code></td>
+        <td><input type="text" value="${escape(p.new)}" maxlength="12" autocomplete="off"></td>
+        <td class="sub">${p.action === "keep" ? "no change — " : ""}${escape(p.reason)}</td>`;
+      tr.querySelector("input").addEventListener("input", idmig.validate);
+      tb.appendChild(tr);
+    }
+    idmig.validate();
+  },
+  // Live check: format + no duplicate new IDs.
+  validate() {
+    const rows = [...document.querySelectorAll("#idmig-table tbody tr")];
+    const vals = rows.map(r => r.querySelector("input").value.trim().toUpperCase());
+    let bad = 0;
+    rows.forEach((r, i) => {
+      const dup = vals.filter(v => v === vals[i]).length > 1;
+      const fmt = /^E\d{4,}$/.test(vals[i]);
+      r.classList.toggle("bad", dup || !fmt);
+      if (dup || !fmt) bad++;
+    });
+    document.getElementById("idmig-apply-btn").disabled = bad > 0;
+    return bad === 0;
+  },
+  async call(path, body) {
+    const r = await fetch(path, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
+  },
+  async preview(overrides) {
+    const st = idmig.status();
+    st.textContent = "Calculating…";
+    try {
+      const d = await idmig.call("/api/employee-ids/preview", { overrides });
+      idmig.panel().hidden = false;
+      idmig.render(d.plan);
+      st.textContent = d.to_change
+        ? `${d.to_change} of ${d.plan.length} IDs will change. Nothing is saved until you press Apply.`
+        : "Every employee ID is already in the E0001 format — nothing to migrate.";
+      document.getElementById("idmig-apply-btn").hidden = !d.to_change;
+    } catch (e) {
+      st.textContent = `Preview failed: ${e.message}`;
+    }
+  },
+};
+document.getElementById("idmig-preview-btn").addEventListener("click", () => idmig.preview({}));
+document.getElementById("idmig-recalc-btn").addEventListener("click", () => {
+  // Pin only the rows whose ID the admin actually changed.
+  const proposed = {};
+  document.querySelectorAll("#idmig-table tbody tr").forEach(tr => {
+    proposed[tr.dataset.old] = tr.querySelector("input").defaultValue.toUpperCase();
+  });
+  const now = idmig.edits(), pins = {};
+  for (const [old, v] of Object.entries(now)) if (v && v !== proposed[old]) pins[old] = v;
+  idmig.preview(pins);
+});
+document.getElementById("idmig-apply-btn").addEventListener("click", async () => {
+  if (!idmig.validate()) return;
+  const edits = idmig.edits();
+  const changing = Object.entries(edits).filter(([o, n]) => o !== n);
+  if (!changing.length) return;
+  const list = changing.map(([o, n]) => `  ${o}  →  ${n}`).join("\n");
+  if (!confirm(`Rename ${changing.length} employee ID(s)?\n\n${list}\n\n` +
+               `A database backup is taken first. Do this while nobody is using the kiosk.`)) return;
+  const st = idmig.status();
+  st.textContent = "Migrating…";
+  try {
+    const d = await idmig.call("/api/employee-ids/migrate",
+                               { overrides: edits, confirm: true });
+    st.textContent = `Done — ${d.changed} renamed, ${d.kept} unchanged. Backup: ${d.backup || "none needed"}. ` +
+      `Renamed people will be re-sent to the hologram app under their new ID.`;
+    idmig.panel().hidden = true;
+    refresh();
+  } catch (e) {
+    st.textContent = `Migration failed — nothing was changed: ${e.message}`;
+  }
+});
+
 document.getElementById("photo-register-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;
@@ -599,7 +735,10 @@ document.getElementById("photo-register-form").addEventListener("submit", async 
   const fd = new FormData(f);
   const r = await fetch("/api/register/photo", { method: "POST", body: fd });
   if (r.ok) {
-    status.textContent = "Done — embeddings queued.";
+    const res = await r.json().catch(() => ({}));
+    status.textContent = res.emp_id
+      ? `Done — registered as ${res.emp_id} (${res.samples} sample${res.samples === 1 ? "" : "s"}).`
+      : "Done — embeddings queued.";
     f.reset();
     refresh();
   } else {

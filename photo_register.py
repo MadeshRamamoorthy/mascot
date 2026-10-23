@@ -27,22 +27,25 @@ def _largest_detection(dets):
 def register_from_photos(
     db,
     pipeline,
-    emp_id: str,
+    emp_id: str | None,
     name: str,
     photos: Iterable[bytes],
 ) -> dict:
     """Process one or more photo bytes blobs into face embeddings.
 
     Returns:
-        {"ok": True,  "samples": N}                if N >= 1 face embeddings saved.
+        {"ok": True,  "samples": N, "emp_id": "E0007", "created": bool}
+                                                   if N >= 1 face embeddings saved.
         {"ok": False, "error": "<reason>"}         if zero usable photos.
 
     Args:
         db:        FaceDB instance. Writer's responsibility.
         pipeline:  HailoFacePipeline instance with .detect / .embed.
                    Caller owns the lifecycle (close after this returns).
-        emp_id:    SQLite primary key. New row created if missing, else
-                   embeddings are appended to the existing row.
+        emp_id:    None (normal): a new person is created and the next
+                   E0001-style ID is generated. An existing ID appends the
+                   photos to that person instead; unknown IDs are refused
+                   (IDs are never typed in, see database.add_employee_auto).
         name:      Human-readable name. Ignored when emp_id already exists.
         photos:    Iterable of raw image bytes (JPEG / PNG / etc.).
     """
@@ -93,13 +96,17 @@ def register_from_photos(
             ),
         }
 
-    if db.employee_exists(emp_id):
+    created = emp_id is None
+    if created:
+        emp_id = db.add_employee_auto(name, embeddings)
+    elif db.employee_exists(emp_id):
         for e in embeddings:
             db.add_embedding(emp_id, e)
     else:
-        db.add_employee(emp_id, name, embeddings)
+        return {"ok": False, "error": f"unknown employee {emp_id!r}"}
     if best_photo is not None:
         db.set_photo(emp_id, best_photo[1])
 
-    return {"ok": True, "samples": len(embeddings), "skipped": skipped,
+    return {"ok": True, "emp_id": emp_id, "created": created,
+            "samples": len(embeddings), "skipped": skipped,
             "photo": best_photo is not None}
