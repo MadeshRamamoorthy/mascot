@@ -295,6 +295,24 @@ The exit code tells you how it went:
 - [ ] `start.sh` prints `hologram : syncing pending employees` at launch
 - [ ] Switched `.env` to the real hologram URL and key
 
+**Admin screen** (`http://<pi>:8081/`, start with `./start_admin.sh`):
+
+- [ ] **New employee:** on "Register from photo", enter a name, attach a
+      photo, upload. The message says "Sent to the hologram app" and the
+      mock shows the person with their photo
+- [ ] **Existing employee:** Employees tab, Edit. The dialog shows the
+      current photo, or "No photo yet". Choose a photo, Upload photo. The
+      message says "Photo saved ... Sent to the hologram app" and the mock
+      receives it
+- [ ] Untick "Also use for face recognition" to change only the photo
+      the hologram app gets, without touching recognition
+- [ ] Upload someone else's photo by mistake: it is refused with "This
+      face doesn't look like ...". "Upload anyway" overrides it
+- [ ] With the mock stopped, upload a photo: the message says the
+      hologram app is offline, and the person is sent later by the kiosk
+      retry or the next start-up sync
+- [ ] Renaming someone in Edit and saving re-sends them in the background
+
 Settings: `HOLOGRAM_SYNC_ON_START=0` skips the start-up sync.
 `HOLOGRAM_RETRY_SEC=0` turns off the in-kiosk retry.
 `HOLOGRAM_BACKFILL_ON_RECOGNITION=false` stops saving photos for

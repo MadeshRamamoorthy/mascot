@@ -46,6 +46,30 @@ def create_admin_app(
         pipeline_factory = _default_pipeline_factory
     hologram = None            # created on first registration
 
+    def _notify_hologram_now(emp_id: str) -> dict:
+        """Send one person to the hologram app right now and say how it
+        went, so the admin page can show it. Used for single uploads; bulk
+        paths use the background _send_to_hologram instead.
+
+        status: sent | offline (kept pending, retried later) |
+                rejected (kept pending) | disabled (no HOLOGRAM_SYNC_URL)"""
+        try:
+            import hologram_sync
+            if not hologram_sync.enabled():
+                return {"status": "disabled"}
+            ok = hologram_sync.send_employee(db, emp_id)
+            if ok:
+                print(f"[hologram] admin sent {emp_id}", flush=True)
+                return {"status": "sent"}
+            err = hologram_sync._last_error(db, emp_id)
+            print(f"[hologram] admin send {emp_id} rejected: {err}", flush=True)
+            return {"status": "rejected", "detail": err}
+        except Exception as exc:  # noqa: BLE001
+            # HologramOffline or anything else: the row stays "not sent";
+            # the kiosk retry / start-up sync delivers it later.
+            print(f"[hologram] admin send {emp_id} failed: {exc!r}", flush=True)
+            return {"status": "offline", "detail": str(exc)[:200]}
+
     def _send_to_hologram(emp_id: str) -> None:
         nonlocal hologram
         try:
@@ -201,8 +225,62 @@ def create_admin_app(
             update["custom_welcome"] = (body.get("custom_welcome") or "").strip() or None
         if not update:
             return ("nothing to update", 400)
+        renamed = ("name" in update
+                   and update["name"] != (db.get_name(emp_id) or ""))
         db.set_employee_profile(emp_id, **update)
+        if renamed:
+            # The hologram app holds the name too.
+            _send_to_hologram(emp_id)
         return ("", 204)
+
+    @app.route("/api/employees/<emp_id>/photo.jpg")
+    def emp_photo(emp_id):
+        """The stored face photo (what the hologram app receives)."""
+        if not check_admin_auth():
+            return request_admin_auth()
+        jpeg = db.get_photo(emp_id)
+        if jpeg is None:
+            return ("no photo", 404)
+        from flask import Response
+        return Response(jpeg, mimetype="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.route("/api/employees/<emp_id>/photo", methods=["POST"])
+    def emp_photo_upload(emp_id):
+        """Add / replace an existing person's photo from the Edit dialog,
+        then send them to the hologram app.
+
+        Multipart: photos[] (one or more), add_to_recognition=1|0 (default
+        1: the faces also improve recognition), force=1 to skip the
+        "is this the same person?" check after a mismatch warning."""
+        if not check_admin_auth():
+            return request_admin_auth()
+        if not db.employee_exists(emp_id):
+            return (f"unknown employee {emp_id}", 404)
+        blobs = [f.read() for f in request.files.getlist("photos")]
+        blobs = [b for b in blobs if b]
+        if not blobs:
+            return ("at least one photo file required", 400)
+        add = request.form.get("add_to_recognition", "1") not in ("0", "false")
+        force = request.form.get("force") in ("1", "true")
+
+        from photo_register import register_from_photos
+        pipeline = pipeline_factory()
+        try:
+            result = register_from_photos(
+                db, pipeline, emp_id, db.get_name(emp_id), blobs,
+                add_embeddings=add, check_match=not force)
+        finally:
+            try:
+                pipeline.close()
+            except Exception:
+                pass
+        if not result.get("ok"):
+            code = 409 if result.get("error") == "mismatch" else 400
+            return jsonify(result), code
+        result["hologram"] = (_notify_hologram_now(emp_id)
+                              if result.get("photo") else {"status": "no_photo"})
+        return jsonify(result)
 
     @app.route("/api/faces/purge", methods=["POST"])
     def faces_purge():
@@ -280,7 +358,7 @@ def create_admin_app(
                 pass
 
         if result.get("ok"):
-            _send_to_hologram(result["emp_id"])
+            result["hologram"] = _notify_hologram_now(result["emp_id"])
         status = 200 if result.get("ok") else 400
         return jsonify(result), status
 

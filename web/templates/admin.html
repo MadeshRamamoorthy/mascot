@@ -78,6 +78,24 @@
   .edit-card .form-actions { display: flex; gap: 8px; justify-content: flex-end;
                              margin-top: 16px; }
   .edit-card #edit-emp-id { background: #f0f0f0; color: #555; }
+  .edit-card .photo-box { margin-top: 14px; padding: 10px 12px;
+                          background: #f5f9fb; border-radius: 6px; font-size: 13px; }
+  .edit-card .photo-box strong { display: block; font-size: 11px; color: #2a9d8f;
+                                 text-transform: uppercase; letter-spacing: 0.04em; }
+  .edit-card .photo-row { display: flex; gap: 12px; align-items: flex-start;
+                          margin-top: 8px; flex-wrap: wrap; }
+  .edit-card .photo-row img { width: 96px; height: 96px; object-fit: cover;
+                              border-radius: 6px; background: #e6ecef; }
+  .edit-card .photo-row .no-photo { width: 96px; height: 96px; border-radius: 6px;
+                                    background: #e6ecef; color: #888; font-size: 12px;
+                                    display: flex; align-items: center;
+                                    justify-content: center; text-align: center; }
+  .edit-card .photo-controls { flex: 1; min-width: 200px; }
+  .edit-card .photo-controls label.inline { text-transform: none; letter-spacing: 0;
+                                            font-size: 13px; color: #333; margin-top: 6px; }
+  .edit-card .photo-controls .buttons { display: flex; gap: 8px; margin-top: 8px; }
+  .holo-ok { color: #1a7f37; }
+  .holo-warn { color: #b26b00; }
 </style>
 </head>
 <body>
@@ -199,6 +217,23 @@
       <label>Name
         <input type="text" id="edit-emp-name" required>
       </label>
+      <div class="photo-box">
+        <strong>Photo <span class="sub" style="text-transform:none;letter-spacing:0;">— sent to the hologram app</span></strong>
+        <div class="photo-row">
+          <img id="edit-emp-photo" alt="Current photo" hidden>
+          <div id="edit-emp-nophoto" class="no-photo">No photo yet</div>
+          <div class="photo-controls">
+            <input type="file" id="edit-emp-photo-file" accept="image/*" multiple>
+            <label class="inline"><input type="checkbox" id="edit-emp-photo-recog" checked>
+              Also use for face recognition</label>
+            <div class="buttons">
+              <button type="button" id="edit-emp-photo-upload">Upload photo</button>
+              <button type="button" id="edit-emp-photo-force" class="danger" hidden>Upload anyway</button>
+            </div>
+            <p id="edit-emp-photo-status" class="sub"></p>
+          </div>
+        </div>
+      </div>
       <label>Profile URL <span class="sub">— or paste their bio text below if the site blocks scrapers (403/404)</span>
         <textarea id="edit-emp-url" rows="3"
                   placeholder="https://example.com/about/their-page
@@ -526,8 +561,72 @@ function openEmpEdit(emp_id) {
   document.getElementById("edit-emp-cache").textContent =
       emp.welcome_cache || "— none yet —";
   document.getElementById("edit-emp-status").textContent = "";
+  document.getElementById("edit-emp-photo-file").value = "";
+  document.getElementById("edit-emp-photo-status").textContent = "";
+  document.getElementById("edit-emp-photo-force").hidden = true;
+  showEmpPhoto(emp.emp_id, emp.has_photo);
   document.getElementById("employee-edit-modal").hidden = false;
 }
+function showEmpPhoto(emp_id, has) {
+  const img = document.getElementById("edit-emp-photo");
+  const none = document.getElementById("edit-emp-nophoto");
+  img.hidden = !has;
+  none.hidden = !!has;
+  if (has) img.src = `/api/employees/${encodeURIComponent(emp_id)}/photo.jpg?t=${Date.now()}`;
+}
+// What happened on the hologram side, in words, with a CSS class.
+function hologramText(h) {
+  switch ((h || {}).status) {
+    case "sent":     return ["Sent to the hologram app.", "holo-ok"];
+    case "offline":  return ["Hologram app is offline. Saved; it will be sent automatically when the app is back.", "holo-warn"];
+    case "rejected": return [`Hologram app rejected it (${h.detail || "error"}). Saved; it will be retried.`, "holo-warn"];
+    case "disabled": return ["Not sent: hologram sending is off (HOLOGRAM_SYNC_URL is not set).", "holo-warn"];
+    case "no_photo": return ["No usable face found, so nothing was sent.", "holo-warn"];
+    default:         return ["", ""];
+  }
+}
+async function uploadEmpPhoto(force) {
+  const emp_id = document.getElementById("edit-emp-id").value;
+  const files = document.getElementById("edit-emp-photo-file").files;
+  const st = document.getElementById("edit-emp-photo-status");
+  const forceBtn = document.getElementById("edit-emp-photo-force");
+  st.className = "sub";
+  if (!files.length) { st.textContent = "Choose a photo first."; return; }
+  const fd = new FormData();
+  for (const f of files) fd.append("photos", f);
+  fd.append("add_to_recognition",
+            document.getElementById("edit-emp-photo-recog").checked ? "1" : "0");
+  if (force) fd.append("force", "1");
+  st.textContent = "Uploading… (finding the face takes a few seconds)";
+  forceBtn.hidden = true;
+  let r, res;
+  try {
+    r = await fetch(`/api/employees/${encodeURIComponent(emp_id)}/photo`,
+                    { method: "POST", body: fd });
+    res = await r.json().catch(() => null);
+  } catch (e) {
+    st.textContent = `Upload failed: ${e}`; return;
+  }
+  if (r.status === 409 && res && res.error === "mismatch") {
+    st.textContent = res.message;
+    st.className = "sub holo-warn";
+    forceBtn.hidden = false;
+    return;
+  }
+  if (!r.ok || !res || !res.ok) {
+    st.textContent = `Upload failed: ${(res && (res.message || res.error)) || r.status}`;
+    return;
+  }
+  const [holo, cls] = hologramText(res.hologram);
+  const added = res.samples ? ` Added ${res.samples} face sample${res.samples === 1 ? "" : "s"} to recognition.` : "";
+  st.textContent = `Photo saved.${added} ${holo}`;
+  st.className = `sub ${cls}`;
+  document.getElementById("edit-emp-photo-file").value = "";
+  showEmpPhoto(emp_id, res.photo);
+  refresh();
+}
+document.getElementById("edit-emp-photo-upload").addEventListener("click", () => uploadEmpPhoto(false));
+document.getElementById("edit-emp-photo-force").addEventListener("click", () => uploadEmpPhoto(true));
 function closeEmpEdit() {
   document.getElementById("employee-edit-modal").hidden = true;
 }
@@ -735,13 +834,16 @@ document.getElementById("photo-register-form").addEventListener("submit", async 
   const f = ev.target;
   const status = document.getElementById("photo-register-status");
   status.textContent = "Uploading…";
+  status.className = "sub";
   const fd = new FormData(f);
   const r = await fetch("/api/register/photo", { method: "POST", body: fd });
   if (r.ok) {
     const res = await r.json().catch(() => ({}));
-    status.textContent = res.emp_id
+    const [holo, cls] = hologramText(res.hologram);
+    status.textContent = (res.emp_id
       ? `Done — registered as ${res.emp_id} (${res.samples} sample${res.samples === 1 ? "" : "s"}).`
-      : "Done — embeddings queued.";
+      : "Done — embeddings queued.") + (holo ? " " + holo : "");
+    status.className = `sub ${cls}`;
     f.reset();
     refresh();
   } else {

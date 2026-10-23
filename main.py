@@ -1108,6 +1108,10 @@ class CameraWorker(threading.Thread):
             return
         self._photo_ids.add(emp_id)       # once per person, even on failure
         try:
+            # The admin app may have stored one since our cache was loaded;
+            # never overwrite a photo someone uploaded on purpose.
+            if self.db.has_photo(emp_id):
+                return
             jpeg = face_crop_jpeg(frame, det.bbox)
             if not jpeg:
                 return

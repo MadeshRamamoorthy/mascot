@@ -30,6 +30,8 @@ def register_from_photos(
     emp_id: str | None,
     name: str,
     photos: Iterable[bytes],
+    add_embeddings: bool = True,
+    check_match: bool = True,
 ) -> dict:
     """Process one or more photo bytes blobs into face embeddings.
 
@@ -48,6 +50,13 @@ def register_from_photos(
                    (IDs are never typed in, see database.add_employee_auto).
         name:      Human-readable name. Ignored when emp_id already exists.
         photos:    Iterable of raw image bytes (JPEG / PNG / etc.).
+        add_embeddings: existing person only. False = just replace their
+                   stored photo, don't add the faces to recognition.
+        check_match: existing person only. Refuse (error "mismatch") when
+                   the uploaded face doesn't look like the faces already
+                   stored for them, so a wrong file can't pollute their
+                   recognition or reach the hologram app. Pass False to
+                   override after a human has checked.
     """
     # Local import so the admin process doesn't fail to load when
     # hailo_infer's heavy deps aren't installed.
@@ -97,16 +106,33 @@ def register_from_photos(
         }
 
     created = emp_id is None
+    match_score = None
+    if not created and not db.employee_exists(emp_id):
+        return {"ok": False, "error": f"unknown employee {emp_id!r}"}
+    if not created:
+        existing = db.get_embeddings(emp_id)
+        if existing.shape[0] > 0:
+            match_score = max(float((existing @ e).max()) for e in embeddings)
+            if check_match and match_score < config.REREGISTER_MATCH_THRESHOLD:
+                return {
+                    "ok": False, "error": "mismatch",
+                    "match_score": round(match_score, 2),
+                    "message": (
+                        f"This face doesn't look like {db.get_name(emp_id)} "
+                        f"(similarity {match_score:.2f}, needs "
+                        f"{config.REREGISTER_MATCH_THRESHOLD:.2f}). Check it's "
+                        "the right person, then use 'Upload anyway'."),
+                }
     if created:
         emp_id = db.add_employee_auto(name, embeddings)
-    elif db.employee_exists(emp_id):
+    elif add_embeddings:
         for e in embeddings:
             db.add_embedding(emp_id, e)
-    else:
-        return {"ok": False, "error": f"unknown employee {emp_id!r}"}
     if best_photo is not None:
         db.set_photo(emp_id, best_photo[1])
 
     return {"ok": True, "emp_id": emp_id, "created": created,
-            "samples": len(embeddings), "skipped": skipped,
-            "photo": best_photo is not None}
+            "samples": len(embeddings) if (created or add_embeddings) else 0,
+            "skipped": skipped, "photo": best_photo is not None,
+            "match_score": (round(match_score, 2)
+                            if match_score is not None else None)}
